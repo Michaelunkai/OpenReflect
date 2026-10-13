@@ -1,2 +1,30 @@
 <Solution>
+  <Folder Name="/src/" />
+  <Folder Name="/src/Abstractions/">
+    <Project Path="src/Abstractions/OpenReflect.Core.Abstractions.csproj" />
+  </Folder>
+  <Folder Name="/src/CLI/">
+    <Project Path="src/CLI/OpenReflect.CLI.csproj" />
+  </Folder>
+  <Folder Name="/src/Core/">
+    <Project Path="src/Core/OpenReflect.Core.csproj" />
+  </Folder>
+  <Folder Name="/src/Format/">
+    <Project Path="src/Format/OpenReflect.Format.csproj" />
+  </Folder>
+  <Folder Name="/src/GUI/">
+    <Project Path="src/GUI/OpenReflect.GUI.csproj" />
+  </Folder>
+  <Folder Name="/src/Restore/">
+    <Project Path="src/Restore/OpenReflect.Restore.csproj" />
+  </Folder>
+  <Folder Name="/src/Schedule/">
+    <Project Path="src/Schedule/OpenReflect.Schedule.csproj" />
+  </Folder>
+  <Folder Name="/src/Verify/">
+    <Project Path="src/Verify/OpenReflect.Verify.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/OpenReflect.Tests/OpenReflect.Tests.csproj" />
+  </Folder>
 </Solution>
