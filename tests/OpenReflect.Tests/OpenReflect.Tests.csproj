@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -18,4 +18,12 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Abstractions\OpenReflect.Core.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Format\OpenReflect.Format.csproj" />
+    <ProjectReference Include="..\..\src\Core\OpenReflect.Core.csproj" />
+    <ProjectReference Include="..\..\src\Verify\OpenReflect.Verify.csproj" />
+    <ProjectReference Include="..\..\src\Restore\OpenReflect.Restore.csproj" />
+    <ProjectReference Include="..\..\src\Schedule\OpenReflect.Schedule.csproj" />
+  </ItemGroup>
 </Project>

@@ -1,0 +1,26 @@
+OpenReflect
+Copyright (c) 2026 OpenReflect Contributors
+Licensed under the MIT License (see LICENSE).
+
+Independent implementation
+--------------------------
+OpenReflect is an independent, clean-room open-source project. It is not
+affiliated with, sponsored by, or endorsed by Paramount Software UK Ltd or
+Macrium Software. "Macrium Reflect" is a product of Paramount Software UK Ltd
+and is a trademark of its respective owner; it is referenced in this project's
+documentation solely for nominative purposes, to describe interoperability
+context and feature-parity comparisons. No source code, binaries, or
+marketing material from any proprietary product is used in OpenReflect.
+
+File format
+-----------
+The OpenReflect image format (.orf) is an original, open format documented in
+docs/FORMAT.md. It is not the file format of any other imaging product and is
+not claimed to be compatible with one.
+
+Third-party software
+--------------------
+OpenReflect is built on the .NET runtime (MIT license, .NET Foundation) and
+targets Microsoft Windows. Windows, Volume Shadow Copy Service (VSS), and
+Task Scheduler are products of Microsoft Corporation; references to them are
+nominative.

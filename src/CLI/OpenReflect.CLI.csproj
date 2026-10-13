@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -7,4 +7,10 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\Core\OpenReflect.Core.csproj" />
+    <ProjectReference Include="..\Restore\OpenReflect.Restore.csproj" />
+    <ProjectReference Include="..\Verify\OpenReflect.Verify.csproj" />
+    <ProjectReference Include="..\Schedule\OpenReflect.Schedule.csproj" />
+  </ItemGroup>
 </Project>
