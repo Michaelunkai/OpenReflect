@@ -14,24 +14,30 @@ file format.
 ### Added
 
 - Core imaging engine: full, incremental, and differential images; used-sector
-  reading; VSS snapshots for consistent captures of in-use volumes; LZ4 and
-  ZStandard compression levels; optional AES-256-GCM encryption.
-- Open image format (`.orf`), fully specified in docs/FORMAT.md, with
-  per-image format-version header.
-- Verification: every image can be re-read and hash-checked after write, and
-  re-verified on demand.
-- Restore with safety gates: explicit confirmation before any target-disk
-  writes, and target sanity checks before destructive operations.
-- Scheduler: backup jobs run on Windows Task Scheduler schedules.
-- Command-line interface (OpenReflect.CLI) covering backup, verify, restore,
-  and job management.
-- Windows Forms graphical interface (OpenReflect.GUI) for the same operations.
-- Test suite under tests/OpenReflect.Tests (xUnit).
+  imaging (all-zero regions skipped, zero-filled on restore); region-hash chain
+  dedup; crash-safe images (dirty-shutdown flag + resume). Compression: per-region
+  deflate, levels 1–9. Optional AES-256-GCM encryption (PBKDF2-HMAC-SHA256,
+  100k–5M iterations; passwords via environment variable or prompt, never stored).
+- Open image format (`.orf`), fully specified in docs/FORMAT.md, with per-image
+  format-version header, CRC-protected header, SHA-256 index manifest and exact
+  logical size in the footer.
+- Verification at three depths (structure / manifest / full re-hash) with failing
+  chunks named; `verify` CLI command.
+- Restore with safety gates: plan-then-execute, dry-run, explicit confirmation,
+  target size and lock checks, failed-restore rollback, and v0.1 refusal of
+  physical-device targets (offline restore workflow arrives in 0.2).
+- Scheduler: backup jobs run on Windows Task Scheduler schedules (`schedule
+  add/list/remove/run`); headless jobs from schemaVersion-1 JSON (`jobs`).
+- Command-line interface (OpenReflect.CLI) covering create, verify, restore,
+  schedule, and jobs.
+- Windows Forms graphical interface (OpenReflect.GUI) for the same operations,
+  with progress bar and tray presence.
+- Test suite under tests/OpenReflect.Tests (xUnit, 27 tests) covering format
+  conformance, engine behavior, verify/restore gates, scheduler and CLI E2E.
+- Documentation set: SPEC, FEATURE-MATRIX, PARITY (honest gaps), TRACEABILITY,
+  TEST-PLAN, PERF, USER-GUIDE, FAQ, FORMAT, ARCHITECTURE, RISKS.
 
-### Known limitations in 0.1.0
+### Deferred to 0.2 (see ROADMAP.md)
 
-See ROADMAP.md for the full deferred list: no boot rescue media, no viBoot,
-no ReDeploy-style dissimilar-hardware restore, no SQL/Exchange application
-agents, no image mount/browse, local and UNC destinations only.
-
-[0.1.0]: https://github.com/openreflect/openreflect/releases/tag/v0.1.0
+VSS snapshots of live volumes (provider seam shipped) · restore to physical disks
+(offline/WinPE workflow) · boot rescue media · zstd codec · parallel pipeline.

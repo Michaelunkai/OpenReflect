@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
@@ -25,5 +25,7 @@
     <ProjectReference Include="..\..\src\Verify\OpenReflect.Verify.csproj" />
     <ProjectReference Include="..\..\src\Restore\OpenReflect.Restore.csproj" />
     <ProjectReference Include="..\..\src\Schedule\OpenReflect.Schedule.csproj" />
+    <ProjectReference Include="..\..\src\GUI\OpenReflect.GUI.csproj" />
+    <ProjectReference Include="..\..\src\CLI\OpenReflect.CLI.csproj" />
   </ItemGroup>
 </Project>

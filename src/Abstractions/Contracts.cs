@@ -47,7 +47,7 @@ public interface IImageEngine
 
 public interface IVerifier
 {
-    Task<VerifyResult> VerifyAsync(string imageFile, VerifyDepth depth = VerifyDepth.Full, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default);
+    Task<VerifyResult> VerifyAsync(string imageFile, VerifyDepth depth = VerifyDepth.Full, IProgress<ProgressInfo>? progress = null, Func<string?>? passwordProvider = null, CancellationToken ct = default);
 }
 
 public interface IRestorer

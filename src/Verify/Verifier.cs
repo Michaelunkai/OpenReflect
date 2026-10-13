@@ -7,9 +7,9 @@ namespace OpenReflect.Verify;
 /// Full = every stored chunk decrypted, decompressed and re-hashed.</summary>
 public sealed class Verifier : IVerifier
 {
-    public async Task<VerifyResult> VerifyAsync(string imageFile, VerifyDepth depth = VerifyDepth.Full, IProgress<ProgressInfo>? progress = null, CancellationToken ct = default)
+    public async Task<VerifyResult> VerifyAsync(string imageFile, VerifyDepth depth = VerifyDepth.Full, IProgress<ProgressInfo>? progress = null, Func<string?>? passwordProvider = null, CancellationToken ct = default)
     {
-        var opened = await OrfImage.OpenAsync(imageFile).ConfigureAwait(false);
+        var opened = await OrfImage.OpenAsync(imageFile, passwordProvider?.Invoke()).ConfigureAwait(false);
         if (!opened.IsSuccess)
             return new VerifyResult(false, imageFile, IsComplete: false, 0, Array.Empty<ChunkError>(), opened.Error);
 
