@@ -78,3 +78,24 @@ Incremental jobs automatically chain onto the newest matching image in the desti
 | `RestoreTargetTooSmall` | existing target smaller than the image's logical size |
 | `VssFailure` | VSS arrives in 0.2; v0.1 reads files/VHDs/idle volumes directly |
 | `dotnet` build errors (MSB4236) | machine SDK is gutted — use `build.ps1` (pins the scoop SDK) |
+
+## System-disk workflow scripts (v0.2)
+
+Two PowerShell scripts drive the whole bare-metal workflow; they live in
+`F:\win11backup` and never touch other folders:
+
+- `orf-backup.ps1` — images the disk that hosts C: into `F:\win11backup`
+  (VSS-consistent, intelligent sectors, zstd), prints a real-time status line,
+  runs a mandatory full verify, deletes the image if verify fails, and cleans
+  older sets after success. `-PlanOnly` previews. Single-writer via a global
+  mutex; refuses non-admin.
+- `orf-restore.ps1` — picks the newest image, verifies it in full, preflights
+  the plan, and arms a ONE-SHOT offline restore (restore-task.json +
+  `bcdedit /bootsequence`). Modes: `-PlanOnly` (dry), `-Disarm`,
+  `-SafeWrite` (zero-fill instead of skip-unwritten), `-Force` (re-arm).
+  It never reboots; the offline environment reboots only on a keypress.
+
+The offline restore environment lives in `C:\OpenReflectRestoreEnv`
+(copy of the system's WinRE with the CLI injected); it is created once and
+booted only through the one-shot bootsequence entry that `orf-restore.ps1`
+arms.

@@ -5,7 +5,7 @@ $scoopSdk = 'F:\backup\windowsapps\installed\scoop\apps\dotnet-sdk\current'
 if (-not (Test-Path "$scoopSdk\dotnet.exe")) { throw "scoop SDK not found at $scoopSdk" }
 $env:PATH = "$scoopSdk;$env:PATH"
 $env:DOTNET_ROOT = $scoopSdk
-$env:MSBuildSDKsPath = "$scoopSdk\sdk\10.0.401\Sdks"
+$env:MSBuildSDKsPath = "$scoopSdk\sdk\10.0.402\Sdks"
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path

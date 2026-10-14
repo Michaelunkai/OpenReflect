@@ -1,6 +1,9 @@
 using System.Reflection;
+using System.Text.Json;
 using OpenReflect.Core;
 using OpenReflect.Core.Abstractions;
+using OpenReflect.DiskAccess;
+using OpenReflect.Format;
 using OpenReflect.Restore;
 using OpenReflect.Schedule;
 using OpenReflect.Verify;
@@ -25,6 +28,10 @@ public static class Program
                 "create" => await CmdCreate(args[1..]),
                 "verify" => await CmdVerify(args[1..]),
                 "restore" => await CmdRestore(args[1..]),
+                "restore-disk" => await CmdRestoreDisk(args[1..]),
+                "backup-disk" => await CmdBackupDisk(args[1..]),
+                "disks" => await CmdDisks(),
+                "inspect" => await CmdInspect(args[1..]),
                 "schedule" => await CmdSchedule(args[1..]),
                 "jobs" => await CmdJobs(args[1..]),
                 var other => Unknown(other),
@@ -51,16 +58,24 @@ public static class Program
         usage: OpenReflect <command> [options]
 
         commands:
-          create    --source <file|device> --dest <dir> [--prefix p] [--kind full|incremental|differential]
-                      [--parent <image.orf>] [--chunk-size <bytes>] [--compress none|deflate] [--level 1-9]
-                      [--encrypt] [--iterations n] [--password-env VAR] [--no-skip-zero] [--log-dir <dir>]
-          verify    <image.orf> [--depth structure|manifest|full]
-          restore   <image.orf> --target <file> [--dry-run] [--confirm]
-                      (v0.1 restores to image files / mounted VHDs only — no physical devices)
-          schedule  add <name> <job.json> <daily|weekly|monthly|logon> [HH:mm] | list | remove <name> | run <name>
-          jobs      <job.json> [--dry-run]
+          create       --source <file|device> --dest <dir> [--prefix p] [--kind full|incremental|differential]
+                         [--parent <image.orf>] [--chunk-size <bytes>] [--compress none|deflate|zstd] [--level 1-9]
+                         [--encrypt] [--iterations n] [--password-env VAR] [--no-skip-zero] [--log-dir <dir>]
+          backup-disk  --disk <n> --dest <dir> [--name p] [--compress zstd|deflate|none] [--level 1-9]
+                         [--no-intelligent] [--no-vss] [--password-env VAR] [--log-dir <dir>]
+                         intelligent sector imaging of whole disk N with VSS consistency (0.2)
+          verify       <image.orf> [--depth structure|manifest|full]
+          restore      <image.orf> --target <file> [--dry-run] [--confirm]   (files / mounted VHDs only)
+          restore-disk --image <orf> --disk <n> [--plan] [--confirm-device-write] [--skip-unwritten]
+                         [--offline] [--no-verify] [--password-env VAR] [--task-file <json>]
+                         guarded whole-disk restore: size match + running-OS refusal + exclusive open (0.2)
+          disks        list disks, partitions and volumes
+          inspect      <image.orf> print header facts
+          schedule     add <name> <job.json> <daily|weekly|monthly|logon> [HH:mm] | list | remove <name> | run <name>
+          jobs         <job.json> [--dry-run]
 
         notes:
+          machine-readable progress is emitted as '##PROGRESS <json>' lines; final summary as '##DONE <json>'.
           encrypted images take the password from the environment variable given at create time (--password-env).
         """);
     }
@@ -178,6 +193,180 @@ public static class Program
         });
         if (!exec.IsSuccess) { Console.Error.WriteLine($"restore failed: {exec.Error}"); return 2; }
         Console.WriteLine(a.ContainsKey("dry-run") ? "dry-run OK (nothing written)" : "restore complete");
+        return 0;
+    }
+
+    /// <summary>Machine-readable progress line for script parsers (orf-backup.ps1 / offline-restore.cmd).</summary>
+    private static void EmitProgress(ProgressInfo p)
+    {
+        var json = JsonSerializer.Serialize(new
+        {
+            phase = p.Phase,
+            bytesDone = p.ProcessedBytes,
+            bytesTotal = p.TotalBytes,
+            chunksDone = p.ChunksDone,
+            chunksTotal = p.ChunksTotal,
+            speedBytesPerSec = (long)p.SpeedBytesPerSec,
+        });
+        Console.WriteLine($"##PROGRESS {json}");
+    }
+
+    private static string TypeLabel(DiskPartition p) => p.GptType switch
+    {
+        var t when t == DiskPartition.GptEfi => "EFI",
+        var t when t == DiskPartition.GptMsr => "MSR",
+        var t when t == DiskPartition.GptBasicData => "Basic",
+        var t when t == DiskPartition.GptWindowsRecovery => "Recovery",
+        _ => p.MbrType != 0 ? $"MBR 0x{p.MbrType:X2}" : (p.GptType == Guid.Empty ? "?" : p.GptType.ToString()),
+    };
+
+    private static async Task<int> CmdDisks()
+    {
+        var volumes = VolumeEnumerator.All();
+        var byPartition = new Dictionary<(uint Disk, uint Part), VolumeRef>();
+        if (volumes.IsSuccess)
+            foreach (var v in volumes.Value)
+                if (v.PartitionNumber > 0)
+                    byPartition.TryAdd((v.DiskNumber, v.PartitionNumber), v);
+
+        for (int n = 0; n < 32; n++)
+        {
+            var disk = await DiskLayout.ReadAsync(n).ConfigureAwait(false);
+            if (!disk.IsSuccess) continue;
+            var d = disk.Value;
+            Console.WriteLine($"disk {n}: {d.SizeBytes / (1024.0 * 1024 * 1024):F1} GiB  {(d.IsGpt ? "GPT" : "MBR")}  sector={d.SectorSize}");
+            foreach (var p in d.Partitions)
+            {
+                var vol = byPartition.TryGetValue(((uint)n, (uint)p.Number), out var v) ? v : null;
+                var letter = vol?.DriveLetter is char c ? $"{c}:" : "--";
+                var fs = vol?.FileSystem is { Length: > 0 } f ? f : "--";
+                Console.WriteLine($"  part {p.Number,2}: {TypeLabel(p),-9} {letter,-2} {fs,-5} {p.Offset / (1024.0 * 1024),10:F0} MiB  {p.Length / (1024.0 * 1024 * 1024),9:F2} GiB  {p.Name}");
+            }
+        }
+        return 0;
+    }
+
+    private static async Task<int> CmdInspect(string[] args)
+    {
+        if (args.Length == 0) { Console.Error.WriteLine("inspect requires <image.orf>"); return 2; }
+        var opened = OrfImage.OpenAsync(args[0]).GetAwaiter().GetResult();
+        if (!opened.IsSuccess) { Console.Error.WriteLine($"inspect failed: {opened.Error}"); return 2; }
+        await using var r = opened.Value;
+        var h = r.Header;
+        var json = JsonSerializer.Serialize(new
+        {
+            imageId = h.ImageId, parentImageId = h.ParentImageId, chainKind = h.ChainKind.ToString(),
+            chunkSizeBytes = h.ChunkSizeBytes, encrypted = h.Encrypted, complete = h.IsComplete,
+            chunkCount = h.ChunkCount, logicalSizeBytes = h.LogicalSizeBytes,
+            sourceLabel = h.SourceLabel, createdAt = h.CreatedAt.ToString("o"), filePath = r.FilePath,
+        });
+        Console.WriteLine(json);
+        return 0;
+    }
+
+    private static async Task<int> CmdBackupDisk(string[] args)
+    {
+        var a = ParseArgs(args);
+        if (!a.TryGetValue("disk", out var diskStr) || !int.TryParse(diskStr, out var diskNumber) || diskNumber < 0)
+        { Console.Error.WriteLine("backup-disk requires --disk <n>"); return 2; }
+        if (!a.TryGetValue("dest", out var destDir)) { Console.Error.WriteLine("backup-disk requires --dest <dir>"); return 2; }
+        string password() => a.TryGetValue("password-env", out var envVar) ? Environment.GetEnvironmentVariable(envVar) ?? "" : "";
+
+        var compression = a.TryGetValue("compress", out var comp) ? comp.ToLowerInvariant() : "zstd";
+        var options = new ImageOptions
+        {
+            Compression = compression switch
+            {
+                "none" => CompressionKind.None,
+                "deflate" => CompressionKind.Deflate,
+                "zstd" => CompressionKind.Zstd,
+                _ => CompressionKind.Zstd,
+            },
+            CompressionLevel = a.TryGetValue("level", out var lvl) ? int.Parse(lvl) : 3,
+            Encryption = a.ContainsKey("encrypt") ? EncryptionKind.Aes256Gcm : EncryptionKind.None,
+            KdfIterations = a.TryGetValue("iterations", out var it) ? int.Parse(it) : 600000,
+            PasswordProvider = password,
+            SourceLabel = a.TryGetValue("name", out var nm) ? nm : $"disk{diskNumber}",
+            Log = a.TryGetValue("log-dir", out var logDir) ? new FileLogSink(logDir) : null,
+        };
+
+        var provider = new DiskSnapshotProvider(
+            preferVss: !a.ContainsKey("no-vss"),
+            intelligent: !a.ContainsKey("no-intelligent"),
+            log: options.Log);
+        var engine = new ImageEngine(provider);
+
+        Directory.CreateDirectory(destDir);
+        var name = a.TryGetValue("name", out var n) ? n : $"disk{diskNumber}";
+        var dest = Path.Combine(destDir, $"{name}-{DateTime.Now:yyyyMMdd-HHmmss}.orf");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        Console.WriteLine($"##START {{\"disk\":{diskNumber},\"dest\":\"{dest.Replace("\\", "\\\\")}\"}}");
+        var result = await engine.CreateFullAsync(DiskLayout.DevicePrefix + diskNumber, dest, options,
+            new Progress<ProgressInfo>(EmitProgress)).ConfigureAwait(false);
+        if (!result.IsSuccess)
+        {
+            Console.Error.WriteLine($"backup-disk failed: {result.Error}");
+            try { if (File.Exists(dest)) File.Delete(dest); } catch (IOException) { }
+            return 2;
+        }
+        var json = JsonSerializer.Serialize(new
+        {
+            image = dest,
+            logicalSizeBytes = result.Value.LogicalSizeBytes,
+            chunkCount = result.Value.ChunkCount,
+            fileBytes = new FileInfo(dest).Length,
+            elapsedSeconds = Math.Round(sw.Elapsed.TotalSeconds, 1),
+        });
+        Console.WriteLine($"##DONE {json}");
+        return 0;
+    }
+
+    private static async Task<int> CmdRestoreDisk(string[] args)
+    {
+        var a = ParseArgs(args);
+        string password() => a.TryGetValue("password-env", out var envVar) ? Environment.GetEnvironmentVariable(envVar) ?? "" : "";
+
+        string image;
+        int diskNumber;
+        bool skipUnwritten = a.ContainsKey("skip-unwritten");
+        bool offline = a.ContainsKey("offline");
+        bool verifyAfter = !a.ContainsKey("no-verify");
+        if (a.TryGetValue("task-file", out var taskFile))
+        {
+            var task = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(File.ReadAllText(taskFile));
+            if (task is null) { Console.Error.WriteLine("restore-disk: unreadable task file"); return 2; }
+            image = task["image"].GetString()!;
+            diskNumber = task["disk"].GetInt32();
+            if (task.TryGetValue("skipUnwritten", out var su)) skipUnwritten = su.GetBoolean();
+            if (task.TryGetValue("verifyAfter", out var va)) verifyAfter = va.GetBoolean();
+            if (task.TryGetValue("offline", out var of)) offline = of.GetBoolean();
+        }
+        else
+        {
+            if (args.Length == 0 || !a.TryGetValue("image", out image!) || !a.TryGetValue("disk", out var d) || !int.TryParse(d, out diskNumber))
+            { Console.Error.WriteLine("restore-disk requires --image <orf> --disk <n> (or --task-file)"); return 2; }
+        }
+
+        var restorer = new DiskRestorer();
+        var plan = await restorer.PlanAsync(image, diskNumber, passwordProvider: password).ConfigureAwait(false);
+        if (!plan.IsSuccess) { Console.Error.WriteLine($"plan failed: {plan.Error}"); return 2; }
+
+        var preflight = await restorer.PreflightAsync(plan.Value, diskNumber, offline).ConfigureAwait(false);
+        if (!preflight.IsSuccess) { Console.Error.WriteLine($"preflight failed: {preflight.Error}"); return 2; }
+        var pf = preflight.Value;
+        Console.WriteLine($"##PLAN {{\"disk\":{diskNumber},\"diskBytes\":{pf.Disk.SizeBytes},\"imageBytes\":{plan.Value.TargetSizeBytes},\"regions\":{plan.Value.Regions.Count},\"hostsRunningOs\":{(pf.HostsRunningOs ? "true" : "false")},\"offline\":{(offline ? "true" : "false")}}}");
+        if (a.ContainsKey("plan")) return pf.HostsRunningOs && !offline ? 2 : 0;
+
+        var exec = await restorer.ExecuteToDiskAsync(plan.Value, diskNumber, new DiskRestoreOptions
+        {
+            Confirmed = a.ContainsKey("confirm-device-write"),
+            OfflineEnvironment = offline,
+            SkipUnwrittenRegions = skipUnwritten,
+            VerifyAfterWrite = verifyAfter,
+            PasswordProvider = password,
+        }, new Progress<ProgressInfo>(EmitProgress)).ConfigureAwait(false);
+        if (!exec.IsSuccess) { Console.Error.WriteLine($"restore-disk failed: {exec.Error}"); return 2; }
+        Console.WriteLine($"##DONE {{\"disk\":{diskNumber},\"image\":\"{image.Replace("\\", "\\\\")}\"}}");
         return 0;
     }
 

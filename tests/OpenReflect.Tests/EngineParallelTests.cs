@@ -1,0 +1,182 @@
+using OpenReflect.Core;
+using OpenReflect.Core.Abstractions;
+using OpenReflect.Format;
+using Xunit;
+
+namespace OpenReflect.Tests;
+
+/// <summary>0.2 parallel pipeline: worker count must not change stored bytes (determinism),
+/// zstd end-to-end through the engine, and backed-range skipping without I/O.</summary>
+public class EngineParallelTests
+{
+    private static string TempDir()
+    {
+        var d = Path.Combine(Path.GetTempPath(), "orp-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(d);
+        return d;
+    }
+
+    private static void AssertSuccess(Result r)
+    {
+        if (!r.IsSuccess) throw new Exception($"expected success but got: {r.Error}");
+    }
+
+    /// <summary>24 MiB mixed source: alternating 1 MiB random / 1 MiB zeros / 1 MiB random.</summary>
+    private static byte[] MakeMixed(int seed = 7)
+    {
+        var data = new byte[24 << 20];
+        var rng = new Random(seed);
+        for (int m = 0; m < 24; m++)
+        {
+            if (m % 3 == 1) continue;                    // zero megabyte
+            var seg = data.AsSpan(m << 20, 1 << 20);
+            rng.NextBytes(seg);
+        }
+        return data;
+    }
+
+    private static async Task<ImageHeaderInfo> CreateAsync(string src, string dest, ImageOptions o)
+    {
+        var engine = new ImageEngine();
+        var r = await engine.CreateFullAsync(src, dest, o);
+        AssertSuccess(r);
+        return r.Value;
+    }
+
+    private static async Task<List<byte[]>> ReadAllChunksAsync(string image)
+    {
+        var opened = await OrfImage.OpenAsync(image);
+        AssertSuccess(opened);
+        await using var r = opened.Value;
+        var list = new List<byte[]>();
+        for (long i = 0; i < r.Header.LogicalSizeBytes; i += r.Header.ChunkSizeBytes)
+        {
+            if (!r.HasChunk(i / r.Header.ChunkSizeBytes)) continue;
+            var chunk = await r.ReadChunkAsync(i / r.Header.ChunkSizeBytes);
+            AssertSuccess(chunk);
+            list.Add(chunk.Value);
+        }
+        return list;
+    }
+
+    [Fact]
+    public async Task P1_Parallel_Create_Is_Deterministic_Across_Codecs()
+    {
+        var dir = TempDir();
+        try
+        {
+            var src = Path.Combine(dir, "src.img");
+            await File.WriteAllBytesAsync(src, MakeMixed());
+
+            foreach (var kind in new[] { CompressionKind.None, CompressionKind.Deflate, CompressionKind.Zstd })
+            {
+                var a = await CreateAsync(src, Path.Combine(dir, $"a-{kind}.orf"), new ImageOptions { Compression = kind, ChunkSizeBytes = 1 << 20 });
+                var b = await CreateAsync(src, Path.Combine(dir, $"b-{kind}.orf"), new ImageOptions { Compression = kind, ChunkSizeBytes = 1 << 20 });
+                Assert.Equal(a.LogicalSizeBytes, b.LogicalSizeBytes);
+                Assert.Equal(a.ChunkCount, b.ChunkCount);
+                var ca = await ReadAllChunksAsync(Path.Combine(dir, $"a-{kind}.orf"));
+                var cb = await ReadAllChunksAsync(Path.Combine(dir, $"b-{kind}.orf"));
+                Assert.Equal(ca.Count, cb.Count);
+                for (int i = 0; i < ca.Count; i++) Assert.Equal(ca[i], cb[i]);
+                // zero-skip: chunks 1,4,7,10,13,16,19,22 are all-zero → absent
+                Assert.Equal(24 - 8, ca.Count);
+            }
+        }
+        finally { try { Directory.Delete(dir, true); } catch (IOException) { } }
+    }
+
+    [Fact]
+    public async Task P2_BackedRanges_Skip_Chunks_Without_IO()
+    {
+        var dir = TempDir();
+        try
+        {
+            var src = Path.Combine(dir, "src.img");
+            await File.WriteAllBytesAsync(src, MakeMixed());
+
+            // fake provider that declares only the first 8 MiB backed; reads outside are forbidden
+            var provider = new RestrictedProvider(src, backedChunks: 8, chunkSize: 1 << 20);
+            var engine = new ImageEngine(provider);
+            var dest = Path.Combine(dir, "backed.orf");
+            var r = await engine.CreateFullAsync(src, dest, new ImageOptions { Compression = CompressionKind.Zstd, ChunkSizeBytes = 1 << 20 });
+            AssertSuccess(r);
+            Assert.Equal(24L << 20, r.Value.LogicalSizeBytes);
+
+            var opened = await OrfImage.OpenAsync(dest);
+            AssertSuccess(opened);
+            await using var reader = opened.Value;
+            // backed 0..8 MiB: zero MBs at 1,4 (7 is backed-zero too) → stored = 0,2,3,5,6 = 5 chunks
+            Assert.Equal(5, reader.Header.ChunkCount > 0 ? CountStored(reader) : -1);
+            // logical size stays 24 MiB (restore zero-fills the unbacked tail)
+            Assert.Equal(24L << 20, reader.Header.LogicalSizeBytes);
+        }
+        finally { try { Directory.Delete(dir, true); } catch (IOException) { } }
+    }
+
+    private static int CountStored(OrfReader r)
+    {
+        int n = 0;
+        for (long i = 0; i < r.Header.LogicalSizeBytes; i += r.Header.ChunkSizeBytes)
+            if (r.HasChunk(i / r.Header.ChunkSizeBytes)) n++;
+        return n;
+    }
+
+    /// <summary>Pass-through that forbids reads outside the declared backed range.</summary>
+    private sealed class RestrictedProvider : ISnapshotProvider
+    {
+        private readonly string _path;
+        private readonly int _backedChunks;
+        private readonly int _chunkSize;
+        public RestrictedProvider(string path, int backedChunks, int chunkSize) { _path = path; _backedChunks = backedChunks; _chunkSize = chunkSize; }
+
+        public Task<Result<ISnapshotSession>> AcquireAsync(string sourcePath, bool allowRawFallback, CancellationToken ct = default)
+        {
+            var fs = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, useAsync: true);
+            ISnapshotSession s = new RestrictedSession(fs, (long)_backedChunks * _chunkSize);
+            return Task.FromResult(Result<ISnapshotSession>.Ok(s));
+        }
+    }
+
+    private sealed class RestrictedSession : ISnapshotSession
+    {
+        private readonly FileStream _fs;
+        public RestrictedSession(FileStream fs, long backedBytes) { _fs = fs; BackedRanges = new[] { new BackingRange(0, backedBytes) }; }
+        public string Description => "restricted";
+        public System.Collections.Generic.IReadOnlyList<BackingRange>? BackedRanges { get; }
+        public Stream OpenReadStream()
+            => new GuardStream(_fs, BackedRanges![0].Offset + BackedRanges![0].Length);
+        public async ValueTask DisposeAsync() => await _fs.DisposeAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Throws if anything reads beyond the backed length (proves skip = no I/O).</summary>
+    private sealed class GuardStream : Stream
+    {
+        private readonly Stream _inner;
+        private readonly long _limit;
+        public GuardStream(Stream inner, long limit) { _inner = inner; _limit = limit; }
+        public override bool CanRead => true;
+        public override bool CanSeek => true;
+        public override bool CanWrite => false;
+        public override long Length => _inner.Length;
+        public override long Position { get => _inner.Position; set => _inner.Position = value; }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_inner.Position + count > _limit) throw new IOException("read outside backed range");
+            return _inner.Read(buffer, offset, count);
+        }
+        public override async System.Threading.Tasks.Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+        {
+            if (_inner.Position + count > _limit) throw new IOException("read outside backed range");
+            return await _inner.ReadAsync(buffer.AsMemory(offset, count), ct).ConfigureAwait(false);
+        }
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            var target = origin switch { SeekOrigin.Begin => offset, SeekOrigin.Current => _inner.Position + offset, _ => _inner.Length + offset };
+            if (target > _limit && target != _inner.Length) throw new IOException("seek outside backed range");
+            return _inner.Seek(Math.Min(target, _limit), SeekOrigin.Begin);
+        }
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+}

@@ -11,7 +11,14 @@ public interface ISnapshotSession : IAsyncDisposable
     /// <summary>A seekable, read-only stream over the source (device, volume, or plain file).</summary>
     Stream OpenReadStream();
     string Description { get; }
+    /// <summary>Byte ranges of the source that actually exist in this stream (intelligent sector).
+    /// null = the whole source is backed; chunks fully outside every range are skipped without I/O
+    /// and restore as zeros (or are skipped with SkipUnwrittenRegions).</summary>
+    IReadOnlyList<BackingRange>? BackedRanges => null;
 }
+
+/// <summary>A contiguous backed range of the source, in source byte coordinates.</summary>
+public readonly record struct BackingRange(long Offset, long Length);
 
 /// <summary>Format-layer writer. Format owns hashing, compression, encryption, framing, finalize ordering (D5).</summary>
 public interface IImageWriter : IAsyncDisposable

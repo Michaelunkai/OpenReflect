@@ -12,11 +12,13 @@ public sealed class OrfReader : IImageReader
     private readonly byte[] _footer;
     private readonly byte[]? _key;
     private readonly bool _indexComplete;
+    private bool _v1Compat;
 
-    private OrfReader(FileStream fs, byte[] header, byte[]? footer, Dictionary<long, long> index, bool indexComplete, string? password)
+    private OrfReader(FileStream fs, byte[] header, byte[]? footer, Dictionary<long, long> index, bool indexComplete, string? password, bool v1Compat)
     {
         _fs = fs; _header = header; _footer = footer; _index = index; _indexComplete = indexComplete;
         Password = password;
+        _v1Compat = v1Compat;
         bool encrypted = (ReadFlags() & OrfPrimitives.FlagEncrypted) != 0;
         _key = encrypted ? Transforms.DeriveKey(Password!, HeaderSalt, KdfIterations) : null;
     }
@@ -27,6 +29,9 @@ public sealed class OrfReader : IImageReader
     private ushort ReadFlags() => BinaryPrimitives.ReadUInt16LittleEndian(_header.AsSpan(OrfPrimitives.H_Flags));
     private long ChunkSize => 1L << _header[OrfPrimitives.H_ChunkShift];
     private int KdfIterations => (int)BinaryPrimitives.ReadUInt32LittleEndian(_header.AsSpan(OrfPrimitives.H_KdfIters));
+    /// <summary>Image-level codec. v2 reads it from the header; v1 images are Deflate when the
+    /// RecFlagCompressed path was used (the only compressed codec v1 defined), else None.</summary>
+    private CompressionKind Codec => _v1Compat ? CompressionKind.Deflate : (CompressionKind)_header[OrfPrimitives.H_Comp];
     private byte[] HeaderSalt => _header.AsSpan(OrfPrimitives.H_KdfSalt, 16).ToArray();
     private byte[] NoncePrefix => _header.AsSpan(OrfPrimitives.H_NoncePrefix, 4).ToArray();
     private long? FooterLogicalSize => _footer is null
@@ -105,8 +110,9 @@ public sealed class OrfReader : IImageReader
 
         if ((rflags & OrfPrimitives.RecFlagCompressed) != 0)
         {
-            try { plain = Transforms.Decompress(plain, originalLen); }
+            try { plain = Transforms.Decompress(Codec, plain, originalLen); }
             catch (InvalidDataException ex) { return Error.Of(ErrorCode.CorruptChunk, $"chunk {chunkIndex} decompress failed", ex.Message); }
+            catch (NotSupportedException ex) { return Error.Of(ErrorCode.UnsupportedVersion, $"chunk {chunkIndex}: {ex.Message}"); }
         }
         else if (plain.Length != originalLen)
             return Error.Of(ErrorCode.CorruptChunk, $"chunk {chunkIndex} length mismatch");
@@ -137,8 +143,12 @@ public sealed class OrfReader : IImageReader
 
             if (BinaryPrimitives.ReadUInt32LittleEndian(header) != OrfPrimitives.HeaderMagic)
                 return await FailAsync(fs, Error.Of(ErrorCode.BadFormat, "not an .orf image (bad magic)"));
-            if (BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(4)) != OrfPrimitives.FormatVersion)
-                return await FailAsync(fs, Error.Of(ErrorCode.UnsupportedVersion, $"format version {BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(4))} not supported"));
+            uint fileVersion = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(4));
+            bool v1Compat = fileVersion == 1;
+            if (fileVersion is < OrfPrimitives.MinReaderVersion or > OrfPrimitives.FormatVersion)
+                return await FailAsync(fs, Error.Of(ErrorCode.UnsupportedVersion, $"format version {fileVersion} not supported (reader accepts {OrfPrimitives.MinReaderVersion}..{OrfPrimitives.FormatVersion})"));
+            if (!v1Compat && header[OrfPrimitives.H_Comp] > (byte)CompressionKind.Zstd)
+                return await FailAsync(fs, Error.Of(ErrorCode.UnsupportedVersion, $"unknown codec id {header[OrfPrimitives.H_Comp]} at header 0x78"));
             uint crc = BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(OrfPrimitives.H_Crc));
             if (crc != OrfPrimitives.Crc32(header.AsSpan(0, OrfPrimitives.H_Crc)))
                 return await FailAsync(fs, Error.Of(ErrorCode.CorruptHeader, "header CRC-32 mismatch"));
@@ -155,9 +165,9 @@ public sealed class OrfReader : IImageReader
                 fs.Seek(-OrfPrimitives.FooterSize, SeekOrigin.End);
                 footer = new byte[OrfPrimitives.FooterSize];
                 await fs.ReadExactlyAsync(footer, ct).ConfigureAwait(false);
-                if (BinaryPrimitives.ReadUInt32LittleEndian(footer) == OrfPrimitives.FooterMagic &&
+                    if (BinaryPrimitives.ReadUInt32LittleEndian(footer) == OrfPrimitives.FooterMagic &&
                     BinaryPrimitives.ReadUInt32LittleEndian(footer.AsSpan(0x28)) == OrfPrimitives.Crc32(footer.AsSpan(0, 0x28)) &&
-                    BinaryPrimitives.ReadUInt32LittleEndian(footer.AsSpan(4)) == OrfPrimitives.FormatVersion)
+                    BinaryPrimitives.ReadUInt32LittleEndian(footer.AsSpan(4)) is >= OrfPrimitives.MinReaderVersion and <= OrfPrimitives.FormatVersion)
                 {
                     long indexOffset = (long)BinaryPrimitives.ReadUInt64LittleEndian(footer.AsSpan(0x08));
                     long indexLength = (long)BinaryPrimitives.ReadUInt64LittleEndian(footer.AsSpan(0x10));
@@ -202,7 +212,7 @@ public sealed class OrfReader : IImageReader
                 }
             }
 
-            return new OrfReader(fs, header, footer, index, indexComplete, password);
+            return new OrfReader(fs, header, footer, index, indexComplete, password, v1Compat);
         }
         catch
         {

@@ -9,6 +9,9 @@
   <Folder Name="/src/Core/">
     <Project Path="src/Core/OpenReflect.Core.csproj" />
   </Folder>
+  <Folder Name="/src/DiskAccess/">
+    <Project Path="src/DiskAccess/OpenReflect.DiskAccess.csproj" />
+  </Folder>
   <Folder Name="/src/Format/">
     <Project Path="src/Format/OpenReflect.Format.csproj" />
   </Folder>

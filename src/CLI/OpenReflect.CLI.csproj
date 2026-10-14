@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <InformationalVersion>0.2.0</InformationalVersion>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -8,8 +9,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="AlphaVSS" Version="2.0.3" />
     <ProjectReference Include="..\Core\OpenReflect.Core.csproj" />
     <ProjectReference Include="..\Restore\OpenReflect.Restore.csproj" />
+    <ProjectReference Include="..\DiskAccess\OpenReflect.DiskAccess.csproj" />
     <ProjectReference Include="..\Verify\OpenReflect.Verify.csproj" />
     <ProjectReference Include="..\Schedule\OpenReflect.Schedule.csproj" />
   </ItemGroup>

@@ -40,8 +40,6 @@ public sealed class OrfWriter : IImageWriter
     {
         if (spec.Encryption == EncryptionKind.Aes256Gcm && string.IsNullOrEmpty(spec.Password))
             throw new ArgumentException("Password is required when encryption is enabled.", nameof(spec));
-        if (spec.Compression == CompressionKind.Zstd)
-            throw new NotSupportedException("zstd codec arrives in 0.2; use None or Deflate.");
 
         var imageId = spec.ImageId == default ? Guid.NewGuid() : spec.ImageId;
         var salt = spec.Encryption == EncryptionKind.Aes256Gcm ? RandomNumberGenerator.GetBytes(16) : new byte[16];
@@ -78,6 +76,7 @@ public sealed class OrfWriter : IImageWriter
         await fs.ReadExactlyAsync(header, ct).ConfigureAwait(false);
         long pos = OrfPrimitives.HeaderSize;
         var records = new List<(long index, long offset)>();
+        ushort firstRecordFlags = 0;
         while (pos + OrfPrimitives.RecordOverhead <= fs.Length)
         {
             var rec = new byte[OrfPrimitives.RecordOverhead];
@@ -86,13 +85,15 @@ public sealed class OrfWriter : IImageWriter
             long logical = (long)System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(rec.AsSpan(OrfPrimitives.R_Index));
             long stored = (long)System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(rec.AsSpan(OrfPrimitives.R_Stored));
             if (logical < 0 || stored < 0 || pos + OrfPrimitives.RecordOverhead + stored > fs.Length) break;
+            if (records.Count == 0)
+                firstRecordFlags = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(rec.AsSpan(OrfPrimitives.R_Flags));
             records.Add((logical, pos));
             pos += OrfPrimitives.RecordOverhead + stored;
         }
         fs.SetLength(pos);
         fs.Seek(pos, SeekOrigin.Begin);
 
-        var spec = SpecFromHeader(header);
+        var spec = SpecFromHeader(header, firstRecordFlags);
         var w = new OrfWriter(fs, header, spec, null);
         if (spec.Encryption == EncryptionKind.Aes256Gcm)
             return Error.Of(ErrorCode.NotSupported, "resume of encrypted images arrives in 0.2");
@@ -100,10 +101,16 @@ public sealed class OrfWriter : IImageWriter
         return w;
     }
 
-    private static OrfCreateSpec SpecFromHeader(byte[] header)
+    private static OrfCreateSpec SpecFromHeader(byte[] header, ushort firstRecordFlags)
     {
         ushort flags = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(OrfPrimitives.H_Flags));
         long chunkSize = 1L << header[OrfPrimitives.H_ChunkShift];
+        uint version = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(4));
+        // v2 carries the codec at 0x78. v1 stored no codec: a compressed record in a v1 image is
+        // Deflate by definition; otherwise None.
+        var compression = version >= 2
+            ? (CompressionKind)header[OrfPrimitives.H_Comp]
+            : (firstRecordFlags & OrfPrimitives.RecFlagCompressed) != 0 ? CompressionKind.Deflate : CompressionKind.None;
         return new OrfCreateSpec
         {
             ImageId = new Guid(header.AsSpan(OrfPrimitives.H_ImageId, 16)),
@@ -111,6 +118,7 @@ public sealed class OrfWriter : IImageWriter
             ChainKind = (ChainKind)header[OrfPrimitives.H_ChainKind],
             ChunkSizeBytes = chunkSize,
             SourceLabel = System.Text.Encoding.UTF8.GetString(header.AsSpan(OrfPrimitives.H_SourceLabel, 32)).TrimEnd('\0'),
+            Compression = compression,
             Encryption = (flags & OrfPrimitives.FlagEncrypted) != 0 ? EncryptionKind.Aes256Gcm : EncryptionKind.None,
             KdfIterations = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(OrfPrimitives.H_KdfIters)),
             LogicalSizeBytes = (long)System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(header.AsSpan(OrfPrimitives.H_ChunkCount, 8)) * chunkSize,
@@ -123,19 +131,25 @@ public sealed class OrfWriter : IImageWriter
         _records.AddRange(records);
     }
 
-    public async Task<Result> AppendChunkAsync(long chunkIndex, ReadOnlyMemory<byte> plaintext, CancellationToken ct = default)
+    public Task<Result> AppendChunkAsync(long chunkIndex, ReadOnlyMemory<byte> plaintext, CancellationToken ct = default)
+        => AppendPreparedAsync(chunkIndex, PrepareChunk(chunkIndex, plaintext), ct);
+
+    /// <summary>Result of PrepareChunk: everything AppendPreparedAsync needs. Thread-safe to produce
+    /// (reads only immutable spec state); appending stays serialized on one writer.</summary>
+    public sealed record PreparedChunk(long OriginalLength, byte[] Stored, ushort Flags, byte[] PlaintextHash);
+
+    /// <summary>Transforms one plaintext chunk (compress/encrypt/hash) WITHOUT touching the file.
+    /// Call from parallel workers; then hand the result to AppendPreparedAsync in logical order.
+    /// Pass knownPlaintextHash to avoid re-hashing when the caller already computed it.</summary>
+    public PreparedChunk PrepareChunk(long chunkIndex, ReadOnlyMemory<byte> plaintext, byte[]? knownPlaintextHash = null)
     {
         ObjectDisposedException.ThrowIf(_abandoned, this);
-        if (_committed) return Error.Of(ErrorCode.Internal, "writer already committed");
-        if (_records.Count > 0 && _records[^1].index >= chunkIndex)
-            return Error.Of(ErrorCode.InvalidArgument, $"chunkIndex {chunkIndex} out of order; must exceed {_records[^1].index} (logical indices may gap for omitted sparse regions)");
-
         ushort rflags = 0;
         var stored = plaintext.ToArray();
 
-        if (_spec.Compression == CompressionKind.Deflate && plaintext.Length > 0)
+        if (_spec.Compression != CompressionKind.None && plaintext.Length > 0)
         {
-            var compressed = Transforms.Compress(stored, _spec.CompressionLevel);
+            var compressed = Transforms.Compress(_spec.Compression, stored, _spec.CompressionLevel);
             if (compressed.Length < stored.Length) { stored = compressed; rflags |= OrfPrimitives.RecFlagCompressed; }
         }
         if (_spec.Encryption == EncryptionKind.Aes256Gcm)
@@ -143,13 +157,23 @@ public sealed class OrfWriter : IImageWriter
             stored = Transforms.EncryptChunk(_key!, _headerBytes.AsSpan(OrfPrimitives.H_NoncePrefix, 4), chunkIndex, stored);
             rflags |= OrfPrimitives.RecFlagEncrypted;
         }
+        var hash = knownPlaintextHash ?? OrfPrimitives.Sha256(plaintext.Span);
+        return new PreparedChunk(plaintext.Length, stored, rflags, hash);
+    }
 
-        var hash = OrfPrimitives.Sha256(plaintext.Span);
-        var rec = OrfPrimitives.BuildRecordHeader(chunkIndex, chunkIndex * _spec.ChunkSizeBytes, plaintext.Length, stored.Length, rflags, hash);
+    public async Task<Result> AppendPreparedAsync(long chunkIndex, PreparedChunk prepared, CancellationToken ct = default)
+    {
+        ObjectDisposedException.ThrowIf(_abandoned, this);
+        if (_committed) return Error.Of(ErrorCode.Internal, "writer already committed");
+        if (_records.Count > 0 && _records[^1].index >= chunkIndex)
+            return Error.Of(ErrorCode.InvalidArgument, $"chunkIndex {chunkIndex} out of order; must exceed {_records[^1].index} (logical indices may gap for omitted sparse regions)");
+
+        var rec = OrfPrimitives.BuildRecordHeader(chunkIndex, chunkIndex * _spec.ChunkSizeBytes,
+            prepared.OriginalLength, prepared.Stored.Length, prepared.Flags, prepared.PlaintextHash);
 
         long offset = _fs.Length;
         await _fs.WriteAsync(rec, ct).ConfigureAwait(false);
-        await _fs.WriteAsync(stored, ct).ConfigureAwait(false);
+        await _fs.WriteAsync(prepared.Stored, ct).ConfigureAwait(false);
         _records.Add((chunkIndex, offset));
         return Result.Ok();
     }

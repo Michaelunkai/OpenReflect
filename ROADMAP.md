@@ -3,6 +3,15 @@
 Status of each capability at a glance, then the honest list of what 0.1.0 does
 not do and why. Shipped items link to the docs that describe them.
 
+## Shipped in 0.2.0
+
+| Capability | Where documented |
+|---|---|
+| Whole-disk intelligent imaging with VSS + zstd (`backup-disk`) | docs/DESIGN-v0.2-win11-workflow.md |
+| Guarded device restore (`restore-disk`) with post-write verify | docs/DESIGN-v0.2-win11-workflow.md |
+| System-disk workflow scripts (orf-backup.ps1 / orf-restore.ps1) | docs/USER-GUIDE.md |
+| One-shot WinRE offline restore environment | docs/DESIGN-v0.2-win11-workflow.md |
+
 ## Shipped in 0.1.0
 
 | Capability | Where documented |

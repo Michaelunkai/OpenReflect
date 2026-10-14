@@ -10,7 +10,12 @@ internal static class OrfPrimitives
     public const int FooterSize = 64;
     public const uint HeaderMagic = 0x4946524F;  // "ORFI" little-endian read
     public const uint FooterMagic = 0x4646524F;  // "ORFF"
-    public const uint FormatVersion = 1;
+    public const uint FormatVersion = 2;
+    /// <summary>Versions the reader accepts: v1 (codec implied Deflate) and v2 (codec byte present).</summary>
+    public const uint MinReaderVersion = 1;
+
+    /// <summary>Codec id (0x78, format v2). Values mirror CompressionKind.</summary>
+    public const int H_Comp = 0x78;
 
     public const ushort FlagDirtyShutdown = 0x0001;
     public const ushort FlagEncrypted = 0x0002;
@@ -60,7 +65,7 @@ internal static class OrfPrimitives
         kdfSalt.AsSpan().CopyTo(h.AsSpan(H_KdfSalt));
         noncePrefix.AsSpan().CopyTo(h.AsSpan(H_NoncePrefix));
         BinaryPrimitives.WriteUInt64LittleEndian(h.AsSpan(H_ChunkCount), (ulong)Math.Max(0, chunkCount));
-        // reserved 0x78..0x7B stay zero
+        h[H_Comp] = (byte)spec.Compression;          // v2 codec byte; 0x79..0x7B stay zero
         BinaryPrimitives.WriteUInt32LittleEndian(h.AsSpan(H_Crc), Crc32(h.AsSpan(0, H_Crc)));
         return h;
     }

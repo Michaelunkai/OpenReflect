@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="AlphaVSS" Version="2.0.3" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
@@ -24,6 +25,7 @@
     <ProjectReference Include="..\..\src\Core\OpenReflect.Core.csproj" />
     <ProjectReference Include="..\..\src\Verify\OpenReflect.Verify.csproj" />
     <ProjectReference Include="..\..\src\Restore\OpenReflect.Restore.csproj" />
+    <ProjectReference Include="..\..\src\DiskAccess\OpenReflect.DiskAccess.csproj" />
     <ProjectReference Include="..\..\src\Schedule\OpenReflect.Schedule.csproj" />
     <ProjectReference Include="..\..\src\GUI\OpenReflect.GUI.csproj" />
     <ProjectReference Include="..\..\src\CLI\OpenReflect.CLI.csproj" />

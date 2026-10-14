@@ -9,5 +9,6 @@
   <ItemGroup>
     <ProjectReference Include="..\Abstractions\OpenReflect.Core.Abstractions.csproj" />
     <ProjectReference Include="..\Format\OpenReflect.Format.csproj" />
+    <ProjectReference Include="..\DiskAccess\OpenReflect.DiskAccess.csproj" />
   </ItemGroup>
 </Project>
