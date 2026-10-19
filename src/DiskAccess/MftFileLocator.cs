@@ -46,9 +46,11 @@ public static class MftFileLocator
                 long runBytes = clusters * vcnBytes;
                 // walk the run in record-aligned <=4 MiB pieces (runs are cluster-aligned, so
                 // pieces stay sector-aligned — safe for shadow devices)
-                for (long pieceStart = 0; pieceStart < runBytes && recordsLeft > 0; pieceStart += pieceSize(runBytes, pieceStart, recSize))
+                for (long pieceStart = 0; pieceStart < runBytes && recordsLeft > 0;)
                 {
                     int piece = pieceSize(runBytes, pieceStart, recSize);
+                    if (piece <= 0) break;   // tail smaller than one record (e.g. 512B clusters, 1KB records) — a 0-length read here would spin forever
+                    pieceStart += piece;
                     var buf = new byte[piece];
                     device.Seek(lcn * vcnBytes + pieceStart, SeekOrigin.Begin);
                     await device.ReadExactlyAsync(buf, ct).ConfigureAwait(false);
@@ -58,7 +60,7 @@ public static class MftFileLocator
                         var rec = new byte[recSize];
                         Buffer.BlockCopy(buf, off, rec, 0, (int)recSize);
                         try { NtfsAllocation.ApplyFixup(rec); }
-                        catch (InvalidDataException) { continue; }   // stale/garbage record — never fatal
+                        catch (Exception) { continue; }   // stale/garbage record (bad USA offsets can throw more than InvalidData) — never fatal
                         if (TryMatchExcluded(rec, pending, vcnBytes, found, out var matched))
                             foreach (var name in matched) pending.Remove(name);
                     }

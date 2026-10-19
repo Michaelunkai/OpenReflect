@@ -197,7 +197,7 @@ public sealed class ImageEngine : IImageEngine
                         results[item.Index] = item;
                     }
                 }
-                catch (Exception ex) { workerFault = ex; }   // a dead worker must never swallow an in-flight chunk silently
+                catch (Exception ex) { Volatile.Write(ref workerFault, ex); }   // a dead worker must never swallow an in-flight chunk silently   // a dead worker must never swallow an in-flight chunk silently
             }, ct)).ToArray();
 
             // readers: R interleaved source readers (R=1 for single-stream sources) feed the
@@ -272,7 +272,7 @@ public sealed class ImageEngine : IImageEngine
                         throw new IOException($"reader faulted before chunk {logical} — pipeline fault",
                             allReaders.Exception.GetBaseException());
                     // a worker that died in-flight takes its chunk with it — surface that honestly
-                    if (workerFault is not null)
+                    if (Volatile.Read(ref workerFault) is not null)
                         throw new IOException($"worker faulted before chunk {logical} — pipeline fault", workerFault);
                     // watchdog: no chunk may stall the ordered writer forever (wedged snapshot,
                     // dead worker) — fail the backup honestly instead of hanging without end
