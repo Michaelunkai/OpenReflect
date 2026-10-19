@@ -40,9 +40,11 @@ if ($Disarm) {
     if (Test-Path $armGuidFile) {
         $guid = (Get-Content $armGuidFile -Raw).Trim()
         if ($guid) {
-            bcdedit /delete $guid
-            if ($LASTEXITCODE -ne 0) { Write-Host "orf-restore: warning - bcdedit /delete failed (exit $LASTEXITCODE); boot entry may linger (harmless: one-shot)." -ForegroundColor Yellow }
-            else { Write-Host "orf-restore: removed one-shot boot entry $guid" }
+            # NEVER bcdedit /delete the loader GUID - that erases the recovery
+            # entry itself. Disarm only clears the one-shot bootsequence value.
+            bcdedit /deletevalue bootsequence
+            if ($LASTEXITCODE -eq 0) { Write-Host "orf-restore: cleared one-shot boot sequence (loader $guid untouched)." }
+            else { Write-Host 'orf-restore: no pending bootsequence to clear.' }
         }
         Remove-Item $armGuidFile -Force
     } else { Write-Host 'orf-restore: nothing armed (no guid file).' }
