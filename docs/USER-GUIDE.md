@@ -81,9 +81,9 @@ Incremental jobs automatically chain onto the newest matching image in the desti
 
 ## System-disk workflow scripts (v0.2)
 
-Two PowerShell scripts drive the whole bare-metal workflow; they live in
-`F:\win11backup` and never touch other folders. On the author's machine they
-are on the PATH as **`myback`** and **`myres`**:
+Three PowerShell scripts drive the whole bare-metal workflow; they live in
+`workflow\` (deployed to `F:\win11backup`). On the author's machine two of
+them are on the PATH as **`myback`** and **`myres`**:
 
 - **`myback`** (`orf-backup.ps1`) — images disk 0 into `F:\win11backup`
   (VSS-consistent, intelligent sectors, zstd), prints a live progress line,
@@ -98,6 +98,14 @@ are on the PATH as **`myback`** and **`myres`**:
   skipping), `-Force` (re-arm). A plain call arms.
   If `C:\OpenReflectRestoreEnv` is missing it is **rebuilt automatically**
   from the system's WinRE before arming. It never reboots itself.
+- **`orf-backup-rm.ps1`** — one fresh, verified FULL image of the C: disk in
+  `F:\win11backup`, then everything else in that folder is deleted, leaving a
+  single-image folder. The mandatory `verify <image> --depth full` must pass
+  **before** any deletion; if it fails, the new image is deleted and nothing
+  else is touched. Also clears stale restore-task.json / arm-bootsequence.guid
+  and log contents from the folder. Never touches `F:\win11recovery`; refuses
+  non-admin; single-writer via the same global mutex as `orf-backup.ps1`.
+  `-PlanOnly` previews.
 
 After arming, the next reboot runs the restore offline in WinRE and then the
 machine boots straight back into the restored Windows — no keys to press, and

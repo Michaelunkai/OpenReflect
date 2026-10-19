@@ -115,6 +115,11 @@ The repo ships two production scripts (used daily on the author's machine as
 powershell -ExecutionPolicy Bypass -File workflow\orf-backup.ps1            # real run
 powershell -ExecutionPolicy Bypass -File workflow\orf-backup.ps1 -PlanOnly  # preview only
 
+# BACKUP+PRUNE — fresh full image, mandatory full verify, then delete everything
+# else in F:\win11backup (single-image folder)
+powershell -ExecutionPolicy Bypass -File workflow\orf-backup-rm.ps1            # real run
+powershell -ExecutionPolicy Bypass -File workflow\orf-backup-rm.ps1 -PlanOnly  # preview only
+
 # RESTORE — verifies the newest image in full, then arms a one-shot WinRE restore
 powershell -ExecutionPolicy Bypass -File workflow\orf-restore.ps1 -PlanOnly # dry-run: verify + plan, arms nothing
 powershell -ExecutionPolicy Bypass -File workflow\orf-restore.ps1           # ARM (plain call arms)
