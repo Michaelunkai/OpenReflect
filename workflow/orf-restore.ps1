@@ -40,8 +40,9 @@ if ($Disarm) {
     if (Test-Path $armGuidFile) {
         $guid = (Get-Content $armGuidFile -Raw).Trim()
         if ($guid) {
-            bcdedit /delete $guid | Out-Null
-            Write-Host "orf-restore: removed one-shot boot entry $guid"
+            bcdedit /delete $guid
+            if ($LASTEXITCODE -ne 0) { Write-Host "orf-restore: warning - bcdedit /delete failed (exit $LASTEXITCODE); boot entry may linger (harmless: one-shot)." -ForegroundColor Yellow }
+            else { Write-Host "orf-restore: removed one-shot boot entry $guid" }
         }
         Remove-Item $armGuidFile -Force
     } else { Write-Host 'orf-restore: nothing armed (no guid file).' }
@@ -131,7 +132,12 @@ $stateFile = Join-Path $EnvDir 'env-state.json'
 if (-not (Test-Path $stateFile)) { Write-Host "orf-restore: missing $stateFile" -ForegroundColor Red; exit 4 }
 $envState = Get-Content $stateFile -Raw | ConvertFrom-Json
 $loaderGuid = $envState.bootEntryGuid
-bcdedit /bootsequence $loaderGuid | Out-Null
+bcdedit /bootsequence $loaderGuid
+if ($LASTEXITCODE -ne 0) {
+    Remove-Item $taskPath -Force -ErrorAction SilentlyContinue
+    Write-Host "orf-restore: bcdedit /bootsequence FAILED (exit $LASTEXITCODE) - nothing armed, task file removed." -ForegroundColor Red
+    exit 6
+}
 $loaderGuid | Set-Content $armGuidFile -Encoding Ascii
 
 Write-Host ''
