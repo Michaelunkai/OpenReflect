@@ -84,12 +84,18 @@ if ($PlanOnly) {
     exit 0
 }
 
-# ---- offline environment must exist -----------------------------------------
+# ---- offline environment must exist (auto-rebuild if wiped) ------------------
 $envWim = Join-Path $EnvDir 'orwinre.wim'
 if (-not (Test-Path $envWim)) {
-    Write-Host ("orf-restore: offline restore environment missing ({0})." -f $envWim) -ForegroundColor Red
-    Write-Host 'orf-restore: build it first (WinRE injection step); refusing to arm.' -ForegroundColor Red
-    exit 4
+    Write-Host 'orf-restore: offline restore environment missing - rebuilding it automatically...' -ForegroundColor Yellow
+    $buildScript = Join-Path $PSScriptRoot 'offline-env\build-orf-env.ps1'
+    if (-not (Test-Path $buildScript)) { Write-Host "orf-restore: rebuild script missing ($buildScript); refusing to arm." -ForegroundColor Red; exit 4 }
+    & $buildScript
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $envWim)) {
+        Write-Host 'orf-restore: environment rebuild failed; refusing to arm.' -ForegroundColor Red
+        exit 4
+    }
+    Write-Host 'orf-restore: offline restore environment rebuilt OK.'
 }
 
 # ---- write task file ---------------------------------------------------------
