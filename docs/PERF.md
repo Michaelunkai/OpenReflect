@@ -3,7 +3,7 @@
 Machine: Ryzen 7 9800X3D, 96 GB RAM, Samsung SSD 9100 PRO 2TB (system disk 0,
 GPT: EFI + MSR + C: 1.86 TiB NTFS + Recovery), destination F: (Fanxiang 1 TB NVMe).
 
-Real run via F:\win11backup\orf-backup.ps1 (backup-disk: VSS + intelligent
+Real run via workflow\orf-backup.ps1 (repo) (backup-disk: VSS + intelligent
 sectors + zstd level 3, 4 MiB chunks):
 
 | Operation | Result |
