@@ -82,20 +82,29 @@ Incremental jobs automatically chain onto the newest matching image in the desti
 ## System-disk workflow scripts (v0.2)
 
 Two PowerShell scripts drive the whole bare-metal workflow; they live in
-`F:\win11backup` and never touch other folders:
+`F:\win11backup` and never touch other folders. On the author's machine they
+are on the PATH as **`myback`** and **`myres`**:
 
-- `orf-backup.ps1` — images the disk that hosts C: into `F:\win11backup`
-  (VSS-consistent, intelligent sectors, zstd), prints a real-time status line,
-  runs a mandatory full verify, deletes the image if verify fails, and cleans
-  older sets after success. `-PlanOnly` previews. Single-writer via a global
-  mutex; refuses non-admin.
-- `orf-restore.ps1` — picks the newest image, verifies it in full, preflights
-  the plan, and arms a ONE-SHOT offline restore (restore-task.json +
-  `bcdedit /bootsequence`). Modes: `-PlanOnly` (dry), `-Disarm`,
-  `-SafeWrite` (zero-fill instead of skip-unwritten), `-Force` (re-arm).
-  It never reboots; the offline environment reboots only on a keypress.
+- **`myback`** (`orf-backup.ps1`) — images disk 0 into `F:\win11backup`
+  (VSS-consistent, intelligent sectors, zstd), prints a live progress line,
+  runs a mandatory full verify, deletes the image if verify fails, and keeps
+  only the latest set. `-PlanOnly` previews. Crash-safe: an interrupted run
+  leaves the dirty-shutdown flag set and is never kept. Single-writer via a
+  global mutex; refuses non-admin.
+- **`myres`** (`orf-restore.ps1`) — picks the newest image, verifies it in
+  full, preflights the plan, and arms a ONE-SHOT offline restore
+  (restore-task.json + `bcdedit /bootsequence`). Modes: `-PlanOnly` (dry),
+  `-Disarm` (cancel), `-SafeWrite` (zero-fill skipped regions instead of
+  skipping), `-Force` (re-arm). A plain call arms.
+  If `C:\OpenReflectRestoreEnv` is missing it is **rebuilt automatically**
+  from the system's WinRE before arming. It never reboots itself.
+
+After arming, the next reboot runs the restore offline in WinRE and then the
+machine boots straight back into the restored Windows — no keys to press, and
+the one-shot boot entry is consumed, so nothing re-arms.
 
 The offline restore environment lives in `C:\OpenReflectRestoreEnv`
-(copy of the system's WinRE with the CLI injected); it is created once and
-booted only through the one-shot bootsequence entry that `orf-restore.ps1`
-arms.
+(copy of the system's WinRE with the CLI injected); it is created on demand
+by `workflow\offline-env\build-orf-env.ps1` (invoked automatically by
+`orf-restore.ps1`) and is booted only through the one-shot bootsequence entry
+that `orf-restore.ps1` arms.

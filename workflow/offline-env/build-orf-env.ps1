@@ -30,7 +30,14 @@ try {
     Write-Output 'copied orwinre.wim + boot.sdi'
 
     # --- 3. DISM mount the COPY (never the registered WinRE) ---
-    if (Test-Path $mount) { throw "mount dir $mount already exists" }
+    if (Test-Path $mount) {
+        # stale empty mount dir from an aborted run is safe to remove; an active DISM mount is not
+        $mountedInfo = & dism.exe /Get-MountedWimInfo 2>$null | Out-String
+        if ($mountedInfo -notmatch [regex]::Escape($mount) -and -not (Get-ChildItem -LiteralPath $mount -Force)) {
+            Remove-Item -LiteralPath $mount -Recurse -Force
+            Write-Output 'removed stale empty mount dir'
+        } else { throw "mount dir $mount already exists (active mount or not empty)" }
+    }
     New-Item -ItemType Directory -Path $mount -Force | Out-Null
     dism.exe /Mount-Wim /WimFile:"$envDir\orwinre.wim" /Index:1 /MountDir:"$mount"
     if ($LASTEXITCODE -ne 0) { throw "dism mount failed: $LASTEXITCODE" }
@@ -111,13 +118,19 @@ wpeutil reboot
     Write-Output 'validation remount OK, unmounted'
 
     # --- 9. env-state.json (bootEntryGuid = existing BCD osloader referencing orwinre) ---
+    # derive CLI version from the actual binary instead of hardcoding it
+    $cliVersion = 'unknown'
+    try {
+        $vOut = & (Join-Path $cliDir 'OpenReflect.CLI.exe') --version 2>$null
+        if ($LASTEXITCODE -eq 0 -and $vOut) { $cliVersion = ($vOut | Select-Object -First 1) -replace '^OpenReflect\s+', '' }
+    } catch { Write-Output ('warning: could not query CLI version: ' + $_.Exception.Message) }
     $state = [ordered]@{
         built         = (Get-Date).ToString('s')
         bootEntryGuid = '{53822684-2ccc-4c4f-a79f-a9d3a59c6e99}'
         sourceWinre   = 'harddisk0\partition4\Recovery\WindowsRE\Winre.wim (read-only copy via temp mount X:)'
         winreVersion  = '10.0.26100.9444 (reagentc /info)'
         cliSource     = $cliDir
-        cliVersion    = '0.2.0+38a4160'
+        cliVersion    = $cliVersion
         files         = @('orwinre.wim','boot.sdi','env-state.json')
         injected      = @('\OpenReflect\ (self-contained CLI)','\OpenReflect\offline-restore.cmd','\Windows\System32\winpeshl.ini')
         bcdModified   = $false
@@ -129,15 +142,17 @@ wpeutil reboot
 catch {
     Write-Output ("ERROR: " + $_.Exception.Message)
     # best-effort cleanup so nothing is left half-mounted
-    & dism.exe /Get-MountedWimInfo 2>$null | Select-String -Pattern $mount -Quiet | ForEach-Object {
+    $mountedInfo = & dism.exe /Get-MountedWimInfo 2>$null | Out-String
+    if ($mountedInfo -match [regex]::Escape($mount)) {
         & dism.exe /Unmount-Wim /MountDir:"$mount" /Discard | Out-Null
     }
     exit 20
 }
 finally {
-    if (Test-Path (Join-Path $envDir 'x.tmp')) { }
+    # always release the temp drive letter, even on failure (was leaked before)
+    if (Test-Path ($letter + '\')) {
+        & "$env:SystemRoot\System32\mountvol.exe" $letter /D | Out-Null
+        Write-Output 'unmounted X:'
+    }
 }
-# --- 10. release temp drive letter ---
-& "$env:SystemRoot\System32\mountvol.exe" $letter /D | Out-Null
-Write-Output 'unmounted X:'
 Get-ChildItem $envDir | Select-Object Name,Length | Format-Table -AutoSize | Out-String | Write-Output

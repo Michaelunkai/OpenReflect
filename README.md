@@ -107,23 +107,27 @@ numbers, never vague percentages. Options: `--compress zstd|deflate|none --level
 
 ### The one-script workflow (recommended)
 
-The repo ships two production scripts (used daily on the author's machine):
+The repo ships two production scripts (used daily on the author's machine as
+`myback` / `myres`):
 
 ```powershell
-# BACKUP — images disk 0 into F:\win11backup, keep-only-latest, ~5 min for 2 TB
+# BACKUP — images disk 0 into F:\win11backup, live progress, keep-only-latest, crash-safe
 powershell -ExecutionPolicy Bypass -File workflow\orf-backup.ps1            # real run
 powershell -ExecutionPolicy Bypass -File workflow\orf-backup.ps1 -PlanOnly  # preview only
 
 # RESTORE — verifies the newest image in full, then arms a one-shot WinRE restore
 powershell -ExecutionPolicy Bypass -File workflow\orf-restore.ps1 -PlanOnly # dry-run: verify + plan, arms nothing
-powershell -ExecutionPolicy Bypass -File workflow\orf-restore.ps1 -Force    # ARM (reboot manually to restore)
+powershell -ExecutionPolicy Bypass -File workflow\orf-restore.ps1           # ARM (plain call arms)
+powershell -ExecutionPolicy Bypass -File workflow\orf-restore.ps1 -SafeWrite # ARM, zero-fill skipped regions
 powershell -ExecutionPolicy Bypass -File workflow\orf-restore.ps1 -Disarm   # cancel a pending restore
 ```
 
 Safety model of `orf-restore.ps1`: refuses unless the image passes a **mandatory full hash
-verify**, the target size matches, and the OS is not running from the target disk. The actual
-write happens offline in WinRE; the boot entry is one-shot and self-expiring, so the boot after
-the restore is your normal — restored — Windows. It never reboots itself.
+verify**, the target size matches, and the OS is not running from the target disk. If the
+offline environment (`C:\OpenReflectRestoreEnv`) is missing it is **rebuilt automatically**
+before arming. The actual write happens offline in WinRE: at the next reboot the restore runs,
+then the machine boots straight back into your restored Windows. The boot entry is one-shot and
+self-expiring; it never reboots itself.
 
 ### Verify & inspect any image
 
