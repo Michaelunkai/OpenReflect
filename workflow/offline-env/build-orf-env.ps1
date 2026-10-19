@@ -50,8 +50,12 @@ try {
     Write-Output 'CLI injected'
 
     # --- 5. offline-restore.cmd (per design doc section 5) ---
+    # WinPE has NO PowerShell: the task JSON is parsed with pure batch (findstr),
+    # and the cmd ALWAYS reboots itself (success: immediately; failure: 30 s so
+    # the error is readable; no task: 15 s). Never waits for a keypress.
     $cmd = @'
 @echo off
+setlocal EnableDelayedExpansion
 title OpenReflect offline restore
 set DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
 echo OpenReflect offline restore environment
@@ -62,35 +66,46 @@ for %%D in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
 if not defined TASKDRV (
   echo No restore-task.json found on any drive - nothing to do.
   color 4F
-  echo Press any key to reboot...
-  pause >nul
+  echo Rebooting in 15 seconds...
+  timeout /t 15 /nobreak >nul
   wpeutil reboot
   exit /b
 )
 set TASK=%TASKDRV%:\win11backup\restore-task.json
 echo Found restore task: %TASK%
-for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "(Get-Content -Raw '%TASK%' | ConvertFrom-Json).image"`) do set IMAGE=%%I
-for /f "usebackq delims=" %%N in (`powershell -NoProfile -Command "(Get-Content -Raw '%TASK%' | ConvertFrom-Json).disk"`) do set DISKNO=%%N
-for /f "usebackq delims=" %%S in (`powershell -NoProfile -Command "(Get-Content -Raw '%TASK%' | ConvertFrom-Json).skipUnwritten"`) do set SKIPUW=%%S
-echo Image: %IMAGE%
-echo Disk : %DISKNO%
+for /f "tokens=2 delims=:, " %%A in ('findstr /C:"\"image\"" "%TASK%"') do set "IMG=%%~A"
+for /f "tokens=2 delims=:, " %%A in ('findstr /C:"\"disk\"" "%TASK%"') do set "DISKNO=%%A"
+for /f "tokens=2 delims=:, " %%A in ('findstr /C:"\"skipUnwritten\"" "%TASK%"') do set "SKIPUW=%%A"
+if not defined IMG (
+  echo Could not parse image path from task file.
+  echo failed > %TASKDRV%:\win11backup\restore-failed.marker
+  color 4F
+  echo RESTORE FAILED - rebooting in 30 seconds...
+  timeout /t 30 /nobreak >nul
+  wpeutil reboot
+  exit /b
+)
+set "IMG=!IMG:\\=\!"
 set EXTRAS=
-if /I "%SKIPUW%"=="True" set EXTRAS=--skip-unwritten
+if /I "%SKIPUW%"=="true" set EXTRAS=--skip-unwritten
+echo Image: %IMG%
+echo Disk : %DISKNO%
 color 1F
 echo === running restore-disk (preflight first; aborts before any write on failure) ===
-\OpenReflect\OpenReflect.CLI.exe restore-disk --image "%IMAGE%" --disk %DISKNO% --task-file "%TASK%" %EXTRAS% --confirm-device-write
+\OpenReflect\OpenReflect.CLI.exe restore-disk --image "%IMG%" --disk %DISKNO% --task-file "%TASK%" %EXTRAS% --confirm-device-write
 if %ERRORLEVEL% EQU 0 (
   echo done > %TASKDRV%:\win11backup\restore-done.marker
   color 2F
-  echo RESTORE SUCCEEDED.
+  echo RESTORE SUCCEEDED - rebooting automatically...
+  timeout /t 5 /nobreak >nul
+  wpeutil reboot
 ) else (
   echo failed > %TASKDRV%:\win11backup\restore-failed.marker
   color 4F
-  echo RESTORE FAILED with code %ERRORLEVEL%.
+  echo RESTORE FAILED with code %ERRORLEVEL% - rebooting in 30 seconds...
+  timeout /t 30 /nobreak >nul
+  wpeutil reboot
 )
-echo Press any key to reboot...
-pause >nul
-wpeutil reboot
 '@
     Set-Content -Path (Join-Path $injOpen 'offline-restore.cmd') -Value $cmd -Encoding Ascii
 
