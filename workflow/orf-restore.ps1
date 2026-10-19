@@ -71,8 +71,11 @@ $sysDisk = (Get-Partition -DriveLetter $env:SystemDrive.TrimEnd(':')).DiskNumber
 $diskInfo = Get-Disk -Number $sysDisk
 Write-Host ("orf-restore: target = disk {0} ({1:N1} GiB)" -f $sysDisk, ($diskInfo.Size / 1GB))
 
-# ---- plan preflight (no writes; refuses live-OS targets without --offline) --
-$preflight = & $CliPath restore-disk --image $image --disk $sysDisk --plan 2>&1
+# ---- plan preflight (no writes) ---------------------------------------------
+# --offline matches how the restore actually runs (offline WinRE via the task
+# file); without it the CLI refuses to plan a live-OS target and arming from
+# the running OS would be impossible.
+$preflight = & $CliPath restore-disk --image $image --disk $sysDisk --plan --offline 2>&1
 $preflight | ForEach-Object { Write-Host "  $_" }
 if ($LASTEXITCODE -ne 0) { Write-Host 'orf-restore: PLAN/PREFLIGHT FAILED - refusing to arm.' -ForegroundColor Red; exit 3 }
 
