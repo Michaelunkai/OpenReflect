@@ -1,0 +1,24 @@
+OpenReflect dir file count : 211
+OpenReflect dir size MB    : 78.4
+CLI exe present            : True
+offline-restore.cmd present: True
+winpeshl.ini present       : True
+--- winpeshl.ini content ---
+[LaunchApps]
+%SYSTEMDRIVE%\OpenReflect\offline-restore.cmd
+--- offline-restore.cmd (first 6 lines) ---
+@echo off
+title OpenReflect offline restore
+set DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+echo OpenReflect offline restore environment
+set TASKDRV=
+for %%D in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
+unmount exit: 0
+--- final env dir ---
+
+Name           Length
+----           ------
+env-state.json    937
+
+
+
