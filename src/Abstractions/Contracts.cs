@@ -15,6 +15,18 @@ public interface ISnapshotSession : IAsyncDisposable
     /// null = the whole source is backed; chunks fully outside every range are skipped without I/O
     /// and restore as zeros (or are skipped with SkipUnwrittenRegions).</summary>
     IReadOnlyList<BackingRange>? BackedRanges => null;
+    /// <summary>Byte ranges whose content is MEANINGLESS on restore (pagefile/hiberfil/swapfile
+    /// extents). Chunks fully inside a range are never read or stored — they restore as zeros,
+    /// exactly like unallocated space (Macrium exclusion parity). Ranges are source-byte
+    /// coordinates; a chunk that merely overlaps a range is still stored normally.</summary>
+    IReadOnlyList<BackingRange> ZeroFillRanges => Array.Empty<BackingRange>();
+    /// <summary>True when OpenReadStream() may be called repeatedly to obtain INDEPENDENT,
+    /// separately-seekable streams over the same consistent source (parallel readers). When false,
+    /// callers must use the single instance and read sequentially.</summary>
+    bool SupportsIndependentStreams => false;
+    /// <summary>An independent stream over the same source when SupportsIndependentStreams is
+    /// true; null otherwise. Ownership passes to the caller, which must dispose it.</summary>
+    Stream? TryOpenIndependentStream() => null;
 }
 
 /// <summary>A contiguous backed range of the source, in source byte coordinates.</summary>

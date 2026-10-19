@@ -196,6 +196,9 @@ public sealed class DiskRestorer
             }
             channel.Writer.TryComplete();
             await Task.WhenAll(workerTasks).ConfigureAwait(false);
+            // always report the final numbers — fast passes (skip-unwritten on small targets)
+            // can finish entirely inside the 250 ms throttle window and otherwise report nothing
+            progress?.Report(new ProgressInfo("restoring-disk", written, plan.TargetSizeBytes, plan.Regions.Count, plan.Regions.Count, clock.Elapsed.TotalSeconds > 0.5 ? written / clock.Elapsed.TotalSeconds : 0));
             await target.FlushAsync(ct).ConfigureAwait(false);
             log.Write(LogLevel.Info, "restore", $"write pass done: {written} bytes written, {skippedSparse} sparse region(s) skipped, {clock.Elapsed}");
 

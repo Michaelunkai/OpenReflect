@@ -60,7 +60,10 @@ public sealed class ImageEngine : IImageEngine
                 var h = await _parent.GetChunkHashAsync(idx, ct).ConfigureAwait(false);
                 return h.IsSuccess ? h.Value : null;
             }
-            finally { _lock.Release(); }
+            finally
+            {
+                _lock.Release();
+            }
         }
         public Task DisposeAsync() => _parent.DisposeAsync().AsTask();
     }
@@ -73,6 +76,7 @@ public sealed class ImageEngine : IImageEngine
         public int Length;
         public byte[] Buffer = Array.Empty<byte>();
         public bool SkippedUnbacked;
+        public bool ZeroFilled;
         public bool Store;
         public OrfWriter.PreparedChunk? Prepared;
         public Exception? Error;
@@ -123,15 +127,15 @@ public sealed class ImageEngine : IImageEngine
         var writer = await OrfImage.CreateAsync(destFile, spec, ct).ConfigureAwait(false);
 
         var clock = Stopwatch.StartNew();
-        long bytesHashed = 0, chunksStored = 0, chunksSkipped = 0, unbackedSkipped = 0;
+        long bytesHashed = 0, chunksStored = 0, chunksSkipped = 0, unbackedSkipped = 0, zeroFilledBytes = 0;
         var lastReport = DateTime.UtcNow;
         int workers = Math.Clamp(Environment.ProcessorCount, 2, 16);
         var dispatch = Channel.CreateBounded<WorkItem>(new BoundedChannelOptions(workers * 2)
         {
             SingleReader = false,
-            SingleWriter = true,
+            SingleWriter = false,   // multiple readers dispatch concurrently
         });
-        // watermark: the reader may run at most (workers*4) chunks ahead of the ordered writer
+        // watermark: readers may run at most (workers*4) chunks ahead of the ordered writer
         var inflight = new SemaphoreSlim(workers * 4, workers * 4);
         var results = new System.Collections.Concurrent.ConcurrentDictionary<long, WorkItem>();
         // Backed-range check must be CHUNK-SAFE: a chunk is backed when fully inside the UNION of
@@ -139,6 +143,9 @@ public sealed class ImageEngine : IImageEngine
         // chunk boundaries. Without the grid expansion, sub-chunk margins (GPT entry arrays!) and
         // non-chunk-aligned partition tails would be silently dropped from the image.
         var backedGrid = MergeAndExpandToChunkGrid(backed, chunkSize, totalSize);
+        // zero-fill ranges (pagefile/hiberfil/swapfile): chunks FULLY inside are never read or
+        // stored — they restore as zeros like unallocated space. Partial overlap stores normally.
+        var zeroGrid = MergeAndExpandToChunkGrid(src.ZeroFillRanges, chunkSize, totalSize);
         bool IsBacked(long chunkIndex)
         {
             if (backedGrid is null) return true;
@@ -147,79 +154,151 @@ public sealed class ImageEngine : IImageEngine
                 if (r.Offset <= off && end <= r.Offset + r.Length) return true;
             return false;
         }
+        bool IsZeroFilled(long chunkIndex)
+        {
+            if (zeroGrid is null) return false;
+            long off = chunkIndex * chunkSize, end = Math.Min(off + chunkSize, totalSize);
+            foreach (var r in zeroGrid)
+                if (r.Offset <= off && end <= r.Offset + r.Length) return true;
+            return false;
+        }
 
+        var streams = new List<Stream>();
         try
         {
             // transform workers: zero-check → parent dedup → prepare (parallel, order-free)
+            Exception? workerFault = null;
             var workerTasks = Enumerable.Range(0, workers).Select(_ => Task.Run(async () =>
             {
-                await foreach (var item in dispatch.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+                try
                 {
-                    try
+                    await foreach (var item in dispatch.Reader.ReadAllAsync(ct).ConfigureAwait(false))
                     {
-                        var span = item.Buffer.AsSpan(0, item.Length);
-                        bool isZero = o.SkipZeroRegions && IsAllZero(span);
-                        item.Store = !isZero;
-                        if (item.Store && kind != ChainKind.Full && parent.HasChunk(item.Index))
+                        try
                         {
-                            var localHash = SHA256.HashData(span);
-                            var refHash = await parent.HashOfAsync(item.Index, ct).ConfigureAwait(false);
-                            if (refHash is not null && refHash.AsSpan().SequenceEqual(localHash))
-                                item.Store = false;   // unchanged region: inherited from parent chain (D2)
-                            else
-                                item.Prepared = writer.PrepareChunk(item.Index, item.Buffer, localHash);
+                            var span = item.Buffer.AsSpan(0, item.Length);
+                            bool isZero = o.SkipZeroRegions && IsAllZero(span);
+                            item.Store = !isZero;
+                            if (item.Store && kind != ChainKind.Full && parent.HasChunk(item.Index))
+                            {
+                                var localHash = SHA256.HashData(span);
+                                var refHash = await parent.HashOfAsync(item.Index, ct).ConfigureAwait(false);
+                                if (refHash is not null && refHash.AsSpan().SequenceEqual(localHash))
+                                    item.Store = false;   // unchanged region: inherited from parent chain (D2)
+                                else
+                                    item.Prepared = writer.PrepareChunk(item.Index, item.Buffer, localHash);
+                            }
+                            else if (item.Store)
+                            {
+                                item.Prepared = writer.PrepareChunk(item.Index, item.Buffer);
+                            }
                         }
-                        else if (item.Store)
-                        {
-                            item.Prepared = writer.PrepareChunk(item.Index, item.Buffer);
-                        }
+                        catch (Exception ex) { item.Error = ex; }
+                        results[item.Index] = item;
                     }
-                    catch (Exception ex) { item.Error = ex; }
-                    results[item.Index] = item;
                 }
+                catch (Exception ex) { workerFault = ex; }   // a dead worker must never swallow an in-flight chunk silently
             }, ct)).ToArray();
 
-            // reader: sequential source reads feed the workers (skips unbacked chunks with no I/O)
-            var readerTask = Task.Run(async () =>
+            // readers: R interleaved source readers (R=1 for single-stream sources) feed the
+            // workers. Reader r handles chunks where chunkIndex % R == r; correctness never
+            // depends on read order (the ordered writer sorts via the results map).
+            int readerCount = src.SupportsIndependentStreams
+                ? Math.Clamp(Environment.ProcessorCount / 2, 1, 12) : 1;
+            streams.Add(stream);
+            var readerTasks = new List<Task>();
+            for (int r = 1; r < readerCount; r++)
             {
-                for (long logical = 0; logical < logicalChunks; logical++)
+                var extra = src.TryOpenIndependentStream();
+                if (extra is null) break;
+                streams.Add(extra);
+            }
+            readerCount = streams.Count;
+            log.Write(LogLevel.Info, "engine", $"readers={readerCount}");
+
+            for (int r = 0; r < readerCount; r++)
+            {
+                var rs = streams[r];
+                int readerId = r;   // capture a per-iteration copy: the for-loop variable keeps mutating (r ends at readerCount)
+                readerTasks.Add(Task.Run(async () =>
                 {
-                    await inflight.WaitAsync(ct).ConfigureAwait(false);
-                    if (!IsBacked(logical))
+                    for (long logical = readerId; logical < logicalChunks; logical += readerCount)
                     {
-                        unbackedSkipped++;
-                        results[logical] = new WorkItem { Index = logical, Length = 0, Store = false, SkippedUnbacked = true };
-                        continue;   // the writer releases the watermark for this entry
+                        await inflight.WaitAsync(ct).ConfigureAwait(false);
+                        if (!IsBacked(logical))
+                        {
+                            unbackedSkipped++;
+                            // release the watermark HERE: skip entries must never hold permits
+                            // ahead of the writer, or the reader of the next backed chunk can be
+                            // starved by 64 unconsumed skips past the writer's position (deadlock)
+                            inflight.Release();
+                            results[logical] = new WorkItem { Index = logical, Length = 0, Store = false, SkippedUnbacked = true };
+                            continue;
+                        }
+                        long chunkLen = Math.Min(chunkSize, totalSize - logical * chunkSize);
+                        if (IsZeroFilled(logical))
+                        {
+                            // meaningless content (pagefile/hiberfil/swapfile): no read, no store —
+                            // the writer counts the bytes for progress and never appends a record
+                            inflight.Release();
+                            results[logical] = new WorkItem { Index = logical, Length = (int)chunkLen, Store = false, ZeroFilled = true };
+                            continue;
+                        }
+                        var item = new WorkItem
+                        {
+                            Index = logical,
+                            Length = (int)chunkLen,
+                            Buffer = new byte[chunkLen],
+                        };
+                        await ReadExactlyAsync(rs, logical * chunkSize, item.Buffer, ct).ConfigureAwait(false);
+                        await dispatch.Writer.WriteAsync(item, ct).ConfigureAwait(false);
                     }
-                    var item = new WorkItem
-                    {
-                        Index = logical,
-                        Length = (int)Math.Min(chunkSize, totalSize - logical * chunkSize),
-                        Buffer = new byte[Math.Min(chunkSize, totalSize - logical * chunkSize)],
-                    };
-                    await ReadExactlyAsync(stream, logical * chunkSize, item.Buffer, ct).ConfigureAwait(false);
-                    await dispatch.Writer.WriteAsync(item, ct).ConfigureAwait(false);
-                }
-                dispatch.Writer.Complete();
-            }, ct);
+                }, ct));
+            }
+            var allReaders = Task.WhenAll(readerTasks);
+            _ = allReaders.ContinueWith(t => dispatch.Writer.TryComplete(), ct, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
 
             // writer: append strictly in logical order as results arrive
             for (long logical = 0; logical < logicalChunks; logical++)
             {
                 ct.ThrowIfCancellationRequested();
                 WorkItem? item;
+                long lastConsumeTick = Environment.TickCount64;
                 while (!results.TryRemove(logical, out item))
                 {
-                    // the reader completes when it has DISPATCHED everything, long before the
+                    // readers complete when they have DISPATCHED everything, long before the
                     // workers drain the channel — only a reader FAULT means the chunk never comes
-                    if (readerTask.Exception is not null)
+                    if (allReaders.Exception is not null)
                         throw new IOException($"reader faulted before chunk {logical} — pipeline fault",
-                            readerTask.Exception.GetBaseException());
-                    await Task.Delay(1, ct).ConfigureAwait(false);
+                            allReaders.Exception.GetBaseException());
+                    // a worker that died in-flight takes its chunk with it — surface that honestly
+                    if (workerFault is not null)
+                        throw new IOException($"worker faulted before chunk {logical} — pipeline fault", workerFault);
+                    // watchdog: no chunk may stall the ordered writer forever (wedged snapshot,
+                    // dead worker) — fail the backup honestly instead of hanging without end
+                    if (Environment.TickCount64 - lastConsumeTick > TimeSpan.FromMinutes(10).TotalMilliseconds)
+                    {
+                        var keys = results.Keys;
+                        long min = keys.Count > 0 ? keys.Min() : -1, max = keys.Count > 0 ? keys.Max() : -1;
+                        int below = 0; foreach (var k in keys) if (k < logical) below++;
+                        log.Write(LogLevel.Error, "engine", $"stall-diagnostic: waiting={logical} resultsCount={keys.Count} below={below} min={min} max={max} inflightFree={inflight.CurrentCount} channelCount={dispatch.Reader.Count}");
+                        var sample = keys.Where(k => k >= logical).OrderBy(k => k).Take(10);
+                        log.Write(LogLevel.Error, "engine", $"stall-diagnostic: next keys: {string.Join(",", sample)}");
+                        throw new IOException($"pipeline stalled before chunk {logical} for over 10 minutes — aborting rather than hanging");
+                    }
+                    await Task.Delay(50, ct).ConfigureAwait(false);
                 }
+                lastConsumeTick = Environment.TickCount64;
                 var work = item!;
                 if (work.Error is not null) throw work.Error;
-                if (work.SkippedUnbacked) { inflight.Release(); continue; }   // never counted as bytes
+                if (work.SkippedUnbacked) { continue; }   // permit already released by the reader
+                if (work.ZeroFilled)
+                {
+                    zeroFilledBytes += work.Length;
+                    chunksSkipped++;
+                    bytesHashed += work.Length;
+                    continue;
+                }
                 if (work.Store && work.Prepared is not null)
                 {
                     var appended = await writer.AppendPreparedAsync(work.Index, work.Prepared, ct).ConfigureAwait(false);
@@ -239,10 +318,10 @@ public sealed class ImageEngine : IImageEngine
                 }
             }
 
-            await readerTask.ConfigureAwait(false);
+            await allReaders.ConfigureAwait(false);
             await Task.WhenAll(workerTasks).ConfigureAwait(false);
             var committed = await writer.CommitAsync(ct).ConfigureAwait(false);
-            log.Write(LogLevel.Info, "engine", $"done: stored={chunksStored} skipped={chunksSkipped} unbacked={unbackedSkipped} bytes={bytesHashed} elapsed={clock.Elapsed}");
+            log.Write(LogLevel.Info, "engine", $"done: stored={chunksStored} skipped={chunksSkipped} unbacked={unbackedSkipped} zeroFilled={zeroFilledBytes} bytes={bytesHashed} elapsed={clock.Elapsed}");
             return committed;
         }
 
@@ -260,6 +339,11 @@ public sealed class ImageEngine : IImageEngine
         }
         finally
         {
+            foreach (var s in streams.Skip(1))
+            {
+                try { await s.DisposeAsync().ConfigureAwait(false); }
+                catch { /* independent reader handles are best-effort */ }
+            }
             await parent.DisposeAsync().ConfigureAwait(false);
         }
     }
@@ -294,11 +378,21 @@ public sealed class ImageEngine : IImageEngine
     {
         s.Seek(at, SeekOrigin.Begin);
         int done = 0;
-        while (done < target.Length)
+        // a wedged snapshot read must FAIL the backup honestly, never hang the pipeline forever
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(TimeSpan.FromMinutes(2));
+        try
         {
-            int n = await s.ReadAsync(target[done..], ct).ConfigureAwait(false);
-            if (n == 0) throw new EndOfStreamException($"source ended at {at + done} of {target.Length + at} requested bytes");
-            done += n;
+            while (done < target.Length)
+            {
+                int n = await s.ReadAsync(target[done..], timeoutCts.Token).ConfigureAwait(false);
+                if (n == 0) throw new EndOfStreamException($"source ended at {at + done} of {target.Length + at} requested bytes");
+                done += n;
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new IOException($"source read timed out at offset {at + done} ({done}/{target.Length} bytes) — snapshot device stopped responding");
         }
     }
 

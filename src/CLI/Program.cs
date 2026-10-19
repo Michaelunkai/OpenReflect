@@ -62,6 +62,7 @@ public static class Program
                          [--parent <image.orf>] [--chunk-size <bytes>] [--compress none|deflate|zstd] [--level 1-9]
                          [--encrypt] [--iterations n] [--password-env VAR] [--no-skip-zero] [--log-dir <dir>]
           backup-disk  --disk <n> --dest <dir> [--name p] [--compress zstd|deflate|none] [--level 1-9]
+                       [--parent <image.orf>]   (parent given: incremental of the changed sectors)
                          [--no-intelligent] [--no-vss] [--password-env VAR] [--log-dir <dir>]
                          intelligent sector imaging of whole disk N with VSS consistency (0.2)
           verify       <image.orf> [--depth structure|manifest|full]
@@ -300,9 +301,15 @@ public static class Program
         var name = a.TryGetValue("name", out var n) ? n : $"disk{diskNumber}";
         var dest = Path.Combine(destDir, $"{name}-{DateTime.Now:yyyyMMdd-HHmmss}.orf");
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        Console.WriteLine($"##START {{\"disk\":{diskNumber},\"dest\":\"{dest.Replace("\\", "\\\\")}\"}}");
-        var result = await engine.CreateFullAsync(DiskLayout.DevicePrefix + diskNumber, dest, options,
-            new Progress<ProgressInfo>(EmitProgress)).ConfigureAwait(false);
+        // incremental when a parent is given: the engine hashes every backed chunk against the
+        // parent chain and stores only changed regions; restore merges the chain automatically
+        string? parent = a.TryGetValue("parent", out var p) ? p : null;
+        Console.WriteLine($"##START {{\"disk\":{diskNumber},\"dest\":\"{dest.Replace("\\", "\\\\")}\",\"kind\":\"{(parent is null ? "full" : "incremental")}\"}}");
+        var result = parent is null
+            ? await engine.CreateFullAsync(DiskLayout.DevicePrefix + diskNumber, dest, options,
+                new Progress<ProgressInfo>(EmitProgress)).ConfigureAwait(false)
+            : await engine.CreateIncrementalAsync(DiskLayout.DevicePrefix + diskNumber, parent, dest, options,
+                new Progress<ProgressInfo>(EmitProgress)).ConfigureAwait(false);
         if (!result.IsSuccess)
         {
             Console.Error.WriteLine($"backup-disk failed: {result.Error}");

@@ -12,6 +12,10 @@ public sealed class NtfsAllocation
     public required uint SectorsPerCluster { get; init; }
     public required long TotalClusters { get; init; }
     public required byte[] Bitmap { get; init; }
+    /// <summary>LCN of $MFT start (boot sector 0x30); needed to walk file records.</summary>
+    public required long MftLcn { get; init; }
+    /// <summary>On-disk MFT record size in bytes (boot sector 0x40).</summary>
+    public required long MftRecordSize { get; init; }
 
     public uint BytesPerCluster => BytesPerSector * SectorsPerCluster;
     public bool IsAllocated(long cluster) => cluster >= 0 && cluster < TotalClusters &&
@@ -138,12 +142,14 @@ public sealed class NtfsAllocation
             SectorsPerCluster = sectorsPerCluster,
             TotalClusters = totalClusters,
             Bitmap = bitmap,
+            MftLcn = mftLcn,
+            MftRecordSize = mftRecordSize,
         };
     }
 
     /// <summary>Multi-sector-header fixup: the last 2 bytes of each 512-byte sector in the record
     /// hold the update-sequence number; the real values sit in the USA array at 0x04.</summary>
-    private static void ApplyFixup(byte[] record)
+    internal static void ApplyFixup(byte[] record)
     {
         ushort usaOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.AsSpan(0x04));
         ushort usaCount = BinaryPrimitives.ReadUInt16LittleEndian(record.AsSpan(0x06));
@@ -162,7 +168,7 @@ public sealed class NtfsAllocation
 
     /// <summary>Finds the unnamed $DATA attribute and parses its non-resident runlist into
     /// (lcn, clusterCount) runs. Negative lcn = sparse.</summary>
-    private static List<(long Lcn, long Clusters)>? ParseDataRuns(byte[] record)
+    internal static List<(long Lcn, long Clusters)>? ParseDataRuns(byte[] record)
     {
         ushort attrOffset = BinaryPrimitives.ReadUInt16LittleEndian(record.AsSpan(0x14));
         int recLen = BinaryPrimitives.ReadInt32LittleEndian(record.AsSpan(0x1C));
@@ -187,7 +193,7 @@ public sealed class NtfsAllocation
         return unnamedData;
     }
 
-    private static List<(long Lcn, long Clusters)>? ParseRunlist(byte[] record, int pos)
+    internal static List<(long Lcn, long Clusters)>? ParseRunlist(byte[] record, int pos)
     {
         var runs = new List<(long, long)>();
         long lcn = 0;

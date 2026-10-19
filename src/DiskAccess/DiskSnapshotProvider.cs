@@ -48,6 +48,7 @@ public sealed class DiskSnapshotProvider : ISnapshotProvider
         // ---- intelligent mode ----
         var extents = new List<MultiExtentStream.Extent>();
         var backed = new List<BackingRange>();
+        var zeroFill = new List<BackingRange>();
         var disposables = new List<IAsyncDisposable>();
         VssSnapshotSet? vss = null;
 
@@ -55,12 +56,9 @@ public sealed class DiskSnapshotProvider : ISnapshotProvider
         long firstPartitionOffset = disk.Partitions.Count > 0 ? disk.Partitions.Min(p => p.Offset) : size;
         long lastPartitionEnd = disk.Partitions.Count > 0 ? disk.Partitions.Max(p => p.Offset + p.Length) : 0;
         long head = Math.Min(MarginBytes, Math.Min(size, firstPartitionOffset));
-        FileStream DirectDiskStream()
-        {
-            var s = new FileStream(DiskLayout.DevicePrefix + disk.Number, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16, useAsync: true);
-            disposables.Add(s);
-            return s;
-        }
+        // extent openers create a FRESH unowned handle per call: each MultiExtentStream instance
+        // (one per parallel reader) owns and closes the handles it opened
+        FileStream DirectDiskStream() => new FileStream(DiskLayout.DevicePrefix + disk.Number, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16, useAsync: true);
 
         if (head > 0)
         {
@@ -114,6 +112,17 @@ public sealed class DiskSnapshotProvider : ISnapshotProvider
                     // small reads past it still return data — so the boot sector's own volume
                     // size is the only trustworthy coverLen; everything past it reads direct
                     coverLen = Math.Min(p.Length, alloc.Value.TotalClusters * alloc.Value.BytesPerCluster);
+                    // pagefile/hiberfil/swapfile extents come from the same shadow ($MFT walk);
+                    // converted to DISK coordinates and clipped to the volume's covered length
+                    var excluded = await MftFileLocator.LocateAsync(probe, alloc.Value, ct: ct).ConfigureAwait(false);
+                    foreach (var r in excluded)
+                    {
+                        long off = partOffset + Math.Min(r.Offset, coverLen);
+                        long len = Math.Min(r.Length, coverLen - Math.Min(r.Offset, coverLen));
+                        if (len > 0) zeroFill.Add(new BackingRange(off, len));
+                    }
+                    if (excluded.Count > 0)
+                        _log?.Write(LogLevel.Info, "intelligent", $"partition {p.Number}: excluding {excluded.Count} pagefile/hiberfil/swapfile range(s), {excluded.Sum(r => r.Length) / (1024.0 * 1024 * 1024):F1} GiB (restored as zeros)");
                     _log?.Write(LogLevel.Info, "intelligent", $"partition {p.Number} ({vol!.FileSystem}): {trimmed.Count} allocated run(s), {trimmed.Sum(r => r.Length) / (1024.0 * 1024):F0} MiB of {p.Length / (1024.0 * 1024):F0} MiB, shadow covers {coverLen / (1024.0 * 1024):F0} of {p.Length / (1024.0 * 1024):F0} MiB");
                 }
                 catch (Exception ex)
@@ -147,7 +156,7 @@ public sealed class DiskSnapshotProvider : ISnapshotProvider
         }
 
         var stream = new MultiExtentStream(extents, size);
-        return new DiskSession(stream, $"disk {disk.Number} (intelligent{(vss is not null ? "+VSS" : "")})", backed, disposables);
+        return new DiskSession(stream, extents, size, $"disk {disk.Number} (intelligent{(vss is not null ? "+VSS" : "")})", backed, zeroFill, disposables);
     }
 
     /// <summary>Opens a shadow device for streaming; overlapped first, plain sync handle as
@@ -173,15 +182,29 @@ public sealed class DiskSnapshotProvider : ISnapshotProvider
 
     private sealed class DiskSession : ISnapshotSession
     {
-        private readonly MultiExtentStream _stream;
         private readonly List<IAsyncDisposable> _disposables;
-        public DiskSession(MultiExtentStream stream, string description, List<BackingRange> backed, List<IAsyncDisposable> disposables)
+        // primary stream (owned + disposed here) plus the extent template for independent copies
+        private readonly MultiExtentStream _stream;
+        private readonly List<MultiExtentStream.Extent> _extentTemplate;
+        private readonly long _size;
+        public DiskSession(MultiExtentStream stream, List<MultiExtentStream.Extent> extentTemplate, long size,
+            string description, List<BackingRange> backed, List<BackingRange> zeroFill, List<IAsyncDisposable> disposables)
         {
-            _stream = stream; Description = description; BackedRanges = backed; _disposables = disposables;
+            _stream = stream; _extentTemplate = extentTemplate; _size = size;
+            Description = description; BackedRanges = backed; ZeroFillRanges = zeroFill; _disposables = disposables;
         }
         public string Description { get; }
         public IReadOnlyList<BackingRange>? BackedRanges { get; }
+        public IReadOnlyList<BackingRange> ZeroFillRanges { get; }
+        // Disabled on purpose: on Win11 26100, volsnap stops serving reads to multiple concurrent
+        // handles on one software shadow mid-run (all in-flight reads hang forever, VSS writers
+        // wedge "Waiting for completion"). Measured repeatedly with 8 and 4 parallel readers on a
+        // 2 TB system disk; single-reader shadow reads are stable. The engine keeps full support
+        // for independent streams (unit-tested via fake sessions); flip this back when the OS
+        // shadow-read path is fixed. TryOpenIndependentStream stays for API compatibility.
+        public bool SupportsIndependentStreams => false;
         public Stream OpenReadStream() => _stream;
+        public Stream? TryOpenIndependentStream() => new MultiExtentStream(_extentTemplate, _size);
         public async ValueTask DisposeAsync()
         {
             await _stream.DisposeAsync().ConfigureAwait(false);
