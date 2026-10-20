@@ -142,13 +142,11 @@ if ($LASTEXITCODE -ne 0) {
 }
 $loaderGuid | Set-Content $armGuidFile -Encoding Ascii
 
-Write-Host ''
 Write-Host '============================================================' -ForegroundColor Yellow
-Write-Host 'ARMED - restart when ready. On the next boot the OpenReflect' -ForegroundColor Yellow
-Write-Host 'offline environment will restore the verified image to disk' -ForegroundColor Yellow
-Write-Host "$sysDisk automatically, then wait for a keypress before rebooting." -ForegroundColor Yellow
-Write-Host 'This script does NOT reboot. The arm is one-shot: after one' -ForegroundColor Yellow
-Write-Host 'boot (used or skipped via ESC) Windows boots normally again.' -ForegroundColor Yellow
-Write-Host 'To cancel before restarting:  orf-restore.ps1 -Disarm' -ForegroundColor Yellow
+Write-Host 'ARMED. Rebooting into the offline restore environment in 15' -ForegroundColor Yellow
+Write-Host 'seconds - the restore then runs fully automatically and the' -ForegroundColor Yellow
+Write-Host 'machine reboots back by itself when done (no keypresses).' -ForegroundColor Yellow
+Write-Host 'To cancel: orf-restore.ps1 -Disarm (within the countdown).' -ForegroundColor Yellow
 Write-Host '============================================================' -ForegroundColor Yellow
+shutdown /r /t 15 /c "OpenReflect restore armed - rebooting into recovery to restore disk 0 automatically"
 exit 0
