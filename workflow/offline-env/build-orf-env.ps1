@@ -50,9 +50,10 @@ try {
     Write-Output 'CLI injected'
 
     # --- 5. offline-restore.cmd (per design doc section 5) ---
-    # WinPE has NO PowerShell: the task JSON is parsed with pure batch (findstr),
-    # and the cmd ALWAYS reboots itself (success: immediately; failure: 30 s so
-    # the error is readable; no task: 15 s). Never waits for a keypress.
+    # WinPE has NO PowerShell: the task JSON is parsed with pure batch (findstr).
+    # EVERY step is logged to %TASKDRV%\win11backup\restore-log.txt so a failure
+    # is always diagnosable. The cmd ALWAYS reboots itself (success: after 5 s;
+    # failure: after 30 s so the error is readable; no task: after 15 s).
     $cmd = @'
 @echo off
 setlocal EnableDelayedExpansion
@@ -72,13 +73,17 @@ if not defined TASKDRV (
   exit /b
 )
 set TASK=%TASKDRV%:\win11backup\restore-task.json
+set LOG=%TASKDRV%:\win11backup\restore-log.txt
+echo OpenReflect offline restore - %DATE% %TIME% > "%LOG%"
 echo Found restore task: %TASK%
+echo task: %TASK%>> "%LOG%"
 for /f "tokens=2 delims=:, " %%A in ('findstr /C:"\"image\"" "%TASK%"') do set "IMG=%%~A"
 for /f "tokens=2 delims=:, " %%A in ('findstr /C:"\"disk\"" "%TASK%"') do set "DISKNO=%%A"
 for /f "tokens=2 delims=:, " %%A in ('findstr /C:"\"skipUnwritten\"" "%TASK%"') do set "SKIPUW=%%A"
 if not defined IMG (
   echo Could not parse image path from task file.
-  echo failed > %TASKDRV%:\win11backup\restore-failed.marker
+  echo failed-parse > %TASKDRV%:\win11backup\restore-failed.marker
+  echo parse FAILED - IMG empty>> "%LOG%"
   color 4F
   echo RESTORE FAILED - rebooting in 30 seconds...
   timeout /t 30 /nobreak >nul
@@ -90,20 +95,29 @@ set EXTRAS=
 if /I "%SKIPUW%"=="true" set EXTRAS=--skip-unwritten
 echo Image: %IMG%
 echo Disk : %DISKNO%
+echo image: %IMG%>> "%LOG%"
+echo disk: %DISKNO% skip: %SKIPUW%>> "%LOG%"
+echo image exists check:>> "%LOG%"
+if exist "%IMG%" (echo   image FOUND>> "%LOG%") else (echo   IMAGE NOT FOUND>> "%LOG%")
+echo volumes in WinPE:>> "%LOG%"
+mountvol >> "%LOG%" 2>&1
 color 1F
 echo === running restore-disk (preflight first; aborts before any write on failure) ===
-\OpenReflect\OpenReflect.CLI.exe restore-disk --image "%IMG%" --disk %DISKNO% --task-file "%TASK%" %EXTRAS% --confirm-device-write
-if %ERRORLEVEL% EQU 0 (
+\OpenReflect\OpenReflect.CLI.exe restore-disk --image "%IMG%" --disk %DISKNO% --task-file "%TASK%" %EXTRAS% --confirm-device-write >> "%LOG%" 2>&1
+set RC=%ERRORLEVEL%
+echo restore-disk exit code: %RC%>> "%LOG%"
+if %RC% EQU 0 (
   echo done > %TASKDRV%:\win11backup\restore-done.marker
   color 2F
-  echo RESTORE SUCCEEDED - rebooting automatically...
+  echo RESTORE SUCCEEDED - full log: restore-log.txt - rebooting automatically...
   timeout /t 5 /nobreak >nul
   wpeutil reboot
 ) else (
   echo failed > %TASKDRV%:\win11backup\restore-failed.marker
   color 4F
-  echo RESTORE FAILED with code %ERRORLEVEL% - rebooting in 30 seconds...
-  timeout /t 30 /nobreak >nul
+  echo RESTORE FAILED with code %RC% - reason in restore-log.txt - rebooting in 60 seconds...
+  type "%LOG%" | findstr /C:"error" /C:"Error" /C:"FAIL"
+  timeout /t 60 /nobreak >nul
   wpeutil reboot
 )
 '@
