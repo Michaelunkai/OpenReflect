@@ -1,6 +1,10 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Primary environment lives on F: (separate physical disk; cleanc only sweeps
+# the C: root). After a successful build the files are best-effort mirrored to
+# C:\OpenReflectRestoreEnv and E:\OpenReflectRestoreEnv as fallbacks.
+
 # --- elevation check (DISM mount + mountvol need admin) ---
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
     ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -10,10 +14,11 @@ Write-Output 'admin: yes'
 $vol      = '\\?\Volume{a0dc0353-4398-4ad7-be1c-6e4245f68af6}\'
 $letter   = 'X:'
 $srcDir   = 'X:\Recovery\WindowsRE'
-$envDir   = 'C:\OpenReflectRestoreEnv'
+$envDir   = 'F:\OpenReflectRestoreEnv'
+$mirrorDirs = @('C:\OpenReflectRestoreEnv', 'E:\OpenReflectRestoreEnv')
 $cliDir   = 'F:\backup\windowsapps\installed\OpenReflect\cli'
 $mount    = 'C:\orf-wimmount'
-$log      = 'C:\OpenReflectRestoreEnv\build-log.txt'
+$log      = 'F:\OpenReflectRestoreEnv\build-log.txt'
 
 try {
     # --- 1. temp mount recovery partition (undo: mountvol X: /D) ---
@@ -177,6 +182,19 @@ if %RC% EQU 0 (
     }
     $state | ConvertTo-Json | Set-Content -Path (Join-Path $envDir 'env-state.json') -Encoding Ascii
     Write-Output 'env-state.json written'
+
+    # --- 10. best-effort mirror to C: and E: (fallback copies, cleanc-safe) ---
+    foreach ($mirror in $mirrorDirs) {
+        try {
+            New-Item -ItemType Directory -Path $mirror -Force | Out-Null
+            foreach ($f in @('orwinre.wim', 'boot.sdi', 'env-state.json')) {
+                Copy-Item -LiteralPath (Join-Path $envDir $f) -Destination (Join-Path $mirror $f) -Force
+            }
+            Write-Output ("mirror OK: {0}" -f $mirror)
+        } catch {
+            Write-Output ("mirror FAILED: {0} ({1})" -f $mirror, $_.Exception.Message)
+        }
+    }
 }
 catch {
     Write-Output ("ERROR: " + $_.Exception.Message)

@@ -21,7 +21,7 @@ param(
     [switch]$Force,
     [string]$DestDir = 'F:\win11backup',
     [string]$CliPath = 'F:\backup\windowsapps\installed\OpenReflect\cli\OpenReflect.CLI.exe',
-    [string]$EnvDir = 'C:\OpenReflectRestoreEnv'
+    [string]$EnvDir = 'F:\OpenReflectRestoreEnv'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -88,18 +88,34 @@ if ($PlanOnly) {
 }
 
 # ---- offline environment must exist (auto-rebuild if wiped) ------------------
-$envWim = Join-Path $EnvDir 'orwinre.wim'
-if (-not (Test-Path $envWim)) {
-    Write-Host 'orf-restore: offline restore environment missing - rebuilding it automatically...' -ForegroundColor Yellow
+# Probe F: -> C: -> E: (F: is primary, separate physical disk; cleanc only
+# sweeps C: root). Use the first copy that actually contains orwinre.wim.
+$envCandidates = @(
+    $EnvDir,
+    'C:\OpenReflectRestoreEnv',
+    'E:\OpenReflectRestoreEnv'
+) | Select-Object -Unique
+$envDirFound = $null
+foreach ($candidate in $envCandidates) {
+    if (Test-Path (Join-Path $candidate 'orwinre.wim')) { $envDirFound = $candidate; break }
+}
+$envWim = Join-Path $envDirFound 'orwinre.wim'
+if (-not $envDirFound) {
+    Write-Host 'orf-restore: offline restore environment missing on F:/C:/E: - rebuilding it automatically...' -ForegroundColor Yellow
     $buildScript = Join-Path $PSScriptRoot 'offline-env\build-orf-env.ps1'
     if (-not (Test-Path $buildScript)) { Write-Host "orf-restore: rebuild script missing ($buildScript); refusing to arm." -ForegroundColor Red; exit 4 }
     & $buildScript
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $envWim)) {
+    $envDirFound = $envCandidates | Where-Object { Test-Path (Join-Path $_ 'orwinre.wim') } | Select-Object -First 1
+    if ($LASTEXITCODE -ne 0 -or -not $envDirFound) {
         Write-Host 'orf-restore: environment rebuild failed; refusing to arm.' -ForegroundColor Red
         exit 4
     }
-    Write-Host 'orf-restore: offline restore environment rebuilt OK.'
+    $envWim = Join-Path $envDirFound 'orwinre.wim'
+    Write-Host ("orf-restore: offline restore environment rebuilt OK ({0})." -f $envDirFound)
+} else {
+    Write-Host ("orf-restore: offline restore environment found at {0}" -f $envDirFound)
 }
+$EnvDir = $envDirFound
 
 # ---- write task file ---------------------------------------------------------
 # resolve the volume-GUID path of the destination drive (letters may shift in WinRE)
