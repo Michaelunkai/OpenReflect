@@ -99,7 +99,17 @@ echo image: %IMG%>> "%LOG%"
 echo disk: %DISKNO% skip: %SKIPUW%>> "%LOG%"
 echo image exists check:>> "%LOG%"
 if exist "%IMG%" (echo   image FOUND>> "%LOG%") else (echo   IMAGE NOT FOUND>> "%LOG%")
-echo volumes in WinPE:>> "%LOG%"
+echo volumes in WinPE (before dismount):>> "%LOG%"
+mountvol >> "%LOG%" 2>&1
+rem --- dismount every volume except the WinPE ramdisk (X:) and the backup
+rem --- drive: a mounted target volume makes the restore refuse (DestinationInUse)
+for %%D in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
+  if /I not "%%D:"=="%TASKDRV%" if /I not "%%D:"=="%SYSTEMDRIVE%" if exist %%D:\ (
+    echo dismounting %%D>> "%LOG%"
+    mountvol %%D: /D >> "%LOG%" 2>&1
+  )
+)
+echo volumes after dismount:>> "%LOG%"
 mountvol >> "%LOG%" 2>&1
 color 1F
 echo === running restore-disk (preflight first; aborts before any write on failure) ===
