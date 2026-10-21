@@ -43,6 +43,11 @@ if ($Disarm) {
             # NEVER bcdedit /delete the loader GUID - that erases the recovery
             # entry itself. Disarm only clears the one-shot bootsequence value.
             bcdedit /deletevalue bootsequence
+            if ($LASTEXITCODE -ne 0) {
+                # observed live: the bare deletevalue can miss; the value lives
+                # on the {bootmgr} entry - clear it there explicitly.
+                bcdedit /deletevalue '{9dea862c-5cdd-4e70-acc1-f32b344d4795}' bootsequence
+            }
             if ($LASTEXITCODE -eq 0) { Write-Host "orf-restore: cleared one-shot boot sequence (loader $guid untouched)." }
             else { Write-Host 'orf-restore: no pending bootsequence to clear.' }
         }
@@ -88,20 +93,19 @@ if ($PlanOnly) {
 }
 
 # ---- offline environment must exist (auto-rebuild if wiped) ------------------
-# Probe F: -> C: -> E: (F: is primary, separate physical disk; cleanc only
-# sweeps C: root). Use the first copy that actually contains orwinre.wim.
+# Probe F: -> E: (F: is primary, separate physical disk). NEVER C: - the user
+# demands the restore chain touch nothing on the system drive (a restore wipes
+# it). Use the first copy that actually contains orwinre.wim.
 $envCandidates = @(
     $EnvDir,
-    'C:\OpenReflectRestoreEnv',
     'E:\OpenReflectRestoreEnv'
 ) | Select-Object -Unique
 $envDirFound = $null
 foreach ($candidate in $envCandidates) {
     if (Test-Path (Join-Path $candidate 'orwinre.wim')) { $envDirFound = $candidate; break }
 }
-$envWim = Join-Path $envDirFound 'orwinre.wim'
 if (-not $envDirFound) {
-    Write-Host 'orf-restore: offline restore environment missing on F:/C:/E: - rebuilding it automatically...' -ForegroundColor Yellow
+    Write-Host 'orf-restore: offline restore environment missing on F:/E: - rebuilding it automatically...' -ForegroundColor Yellow
     $buildScript = Join-Path $PSScriptRoot 'offline-env\build-orf-env.ps1'
     if (-not (Test-Path $buildScript)) { Write-Host "orf-restore: rebuild script missing ($buildScript); refusing to arm." -ForegroundColor Red; exit 4 }
     & $buildScript
@@ -116,6 +120,46 @@ if (-not $envDirFound) {
     Write-Host ("orf-restore: offline restore environment found at {0}" -f $envDirFound)
 }
 $EnvDir = $envDirFound
+
+# ---- sync the BCD loader to the env copy that actually exists ----------------
+# The loader entry references ramdisk=[drive]\OpenReflectRestoreEnv\orwinre.wim.
+# If the drive that entry names was wiped (F: lost its copy once), the boot
+# dies on a missing ramdisk file BEFORE any restore code runs. Re-point the
+# entry at $envDirFound on every arm so the armed boot can never be stale.
+$stateFile = Join-Path $EnvDir 'env-state.json'
+if (-not (Test-Path $stateFile)) { Write-Host "orf-restore: missing $stateFile" -ForegroundColor Red; exit 4 }
+$envState = Get-Content $stateFile -Raw | ConvertFrom-Json
+$loaderGuid = $envState.bootEntryGuid
+$bcdDump = (bcdedit /enum all /v | Out-String)
+$entryBlock = ($bcdDump -split "`r?`n  -{5,}" |
+    Where-Object { $_ -match [regex]::Escape($loaderGuid) } | Select-Object -First 1)
+if (-not $entryBlock) { Write-Host "orf-restore: loader $loaderGuid not found in BCD; refusing to arm." -ForegroundColor Red; exit 6 }
+if ($entryBlock -notmatch 'ramdisk=\[[A-Za-z]:\]\\OpenReflectRestoreEnv\\orwinre\.wim,\{([0-9a-fA-F\-]+)\}') {
+    Write-Host 'orf-restore: loader entry is not an OpenReflect ramdisk entry; refusing to arm.' -ForegroundColor Red; exit 6
+}
+$ramdiskOpts = $Matches[1]
+$envDrive = $EnvDir.Substring(0, 2)   # 'F:' / 'E:'
+$ramdiskRef = "ramdisk=[$envDrive]\OpenReflectRestoreEnv\orwinre.wim,{$ramdiskOpts}"
+$devOk = $true
+& bcdedit /set $loaderGuid device $ramdiskRef | Out-Null
+if ($LASTEXITCODE -ne 0) { $devOk = $false }
+& bcdedit /set $loaderGuid osdevice $ramdiskRef | Out-Null
+if ($LASTEXITCODE -ne 0) { $devOk = $false }
+# the ramdisk options entry names boot.sdi via ramdisksdidevice - it must name
+# the SAME drive as the wim or the boot dies loading the sd before WinPE starts
+# (observed live: loader on C:, ramdisksdidevice stuck on partition=F: with no
+# F: copy -> boot error screen on every armed reboot).
+& bcdedit /set "{$ramdiskOpts}" ramdisksdidevice "partition=$envDrive" | Out-Null
+if ($LASTEXITCODE -ne 0) { $devOk = $false }
+if (-not $devOk) {
+    Write-Host ("orf-restore: bcdedit /set FAILED - opts=[{0}] ref=[{1}] - refusing to arm." -f $ramdiskOpts, $ramdiskRef) -ForegroundColor Red
+    & bcdedit /set $loaderGuid device $ramdiskRef
+    & bcdedit /set $loaderGuid osdevice $ramdiskRef
+    & bcdedit /set "{$ramdiskOpts}" ramdisksdidevice "partition=$envDrive"
+    exit 6
+}
+Write-Host ("orf-restore: loader re-pointed to {0}" -f $ramdiskRef)
+Write-Host ("orf-restore: ramdisk options re-pointed to partition={0}" -f $envDrive)
 
 # ---- write task file ---------------------------------------------------------
 # resolve the volume-GUID path of the destination drive (letters may shift in WinRE)
@@ -136,10 +180,15 @@ $taskJson = @{
     offline       = $true
 } | ConvertTo-Json
 $taskPath = Join-Path $DestDir 'restore-task.json'
-if ((Test-Path $taskPath) -and -not $Force) {
-    Write-Host 'orf-restore: restore-task.json already exists (already armed?). Use -Force to re-arm.' -ForegroundColor Yellow
+# A stale task file only blocks arming while a bootsequence is actually pending
+# (a consumed/failed boot leaves the file behind - re-running must just work
+# with the newest backup, never dead-end on last run's leftovers).
+$bootseqPending = (bcdedit /enum all /v | Out-String) -match 'bootsequence'
+if ((Test-Path $taskPath) -and $bootseqPending -and -not $Force) {
+    Write-Host 'orf-restore: restore-task.json exists and a bootsequence is pending (already armed?). Use -Force to re-arm.' -ForegroundColor Yellow
     exit 5
 }
+if (Test-Path $taskPath) { Write-Host 'orf-restore: replacing stale restore-task.json (no pending bootsequence).' }
 Set-Content $taskPath $taskJson -Encoding Ascii
 Write-Host ("orf-restore: wrote {0}:" -f $taskPath)
 Write-Host $taskJson

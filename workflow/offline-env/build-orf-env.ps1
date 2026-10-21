@@ -1,9 +1,9 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Primary environment lives on F: (separate physical disk; cleanc only sweeps
-# the C: root). After a successful build the files are best-effort mirrored to
-# C:\OpenReflectRestoreEnv and E:\OpenReflectRestoreEnv as fallbacks.
+# Primary environment lives on F: (separate physical disk). After a successful
+# build the files are best-effort mirrored to E:\OpenReflectRestoreEnv as the
+# fallback. NEVER C: - the restore chain must touch nothing on the system drive.
 
 # --- elevation check (DISM mount + mountvol need admin) ---
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -15,9 +15,9 @@ $vol      = '\\?\Volume{a0dc0353-4398-4ad7-be1c-6e4245f68af6}\'
 $letter   = 'X:'
 $srcDir   = 'X:\Recovery\WindowsRE'
 $envDir   = 'F:\OpenReflectRestoreEnv'
-$mirrorDirs = @('C:\OpenReflectRestoreEnv', 'E:\OpenReflectRestoreEnv')
+$mirrorDirs = @('E:\OpenReflectRestoreEnv')
 $cliDir   = 'F:\backup\windowsapps\installed\OpenReflect\cli'
-$mount    = 'C:\orf-wimmount'
+$mount    = 'F:\orf-wimmount'
 $log      = 'F:\OpenReflectRestoreEnv\build-log.txt'
 
 try {
@@ -106,16 +106,19 @@ echo image exists check:>> "%LOG%"
 if exist "%IMG%" (echo   image FOUND>> "%LOG%") else (echo   IMAGE NOT FOUND>> "%LOG%")
 echo volumes in WinPE (before dismount):>> "%LOG%"
 mountvol >> "%LOG%" 2>&1
-rem --- dismount every volume except the WinPE ramdisk (X:) and the backup
-rem --- drive: a mounted target volume makes the restore refuse (DestinationInUse)
-for %%D in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
-  if /I not "%%D:"=="%TASKDRV%" if /I not "%%D:"=="%SYSTEMDRIVE%" if exist %%D:\ (
-    echo dismounting %%D>> "%LOG%"
-    mountvol %%D: /D >> "%LOG%" 2>&1
-  )
+rem --- dismount ONLY the drive letters that belong to the target disk: a
+rem --- mounted target volume makes the restore refuse (DestinationInUse).
+rem --- External/backup drives are NEVER dismounted (hard user rule).
+set DPOUT=%TASKDRV%:\win11backup\diskpart-target.txt
+echo select disk %DISKNO%> "%TASKDRV%:\win11backup\dp-target.txt"
+echo detail disk>> "%TASKDRV%:\win11backup\dp-target.txt"
+diskpart /s "%TASKDRV%:\win11backup\dp-target.txt" > "%DPOUT%" 2>&1
+type "%DPOUT%">> "%LOG%"
+for /f "tokens=3" %%B in ('findstr /R /C:"Volume [0-9][0-9]* *[A-Z] " "%DPOUT%"') do (
+  echo dismounting target-disk volume %%B:>> "%LOG%"
+  mountvol %%B: /D >> "%LOG%" 2>&1
 )
-echo volumes after dismount:>> "%LOG%"
-mountvol >> "%LOG%" 2>&1
+echo target-disk volumes dismounted; all other drives untouched>> "%LOG%"
 color 1F
 echo === running restore-disk (preflight first; aborts before any write on failure) ===
 \OpenReflect\OpenReflect.CLI.exe restore-disk --image "%IMG%" --disk %DISKNO% --task-file "%TASK%" %EXTRAS% --confirm-device-write >> "%LOG%" 2>&1
@@ -183,7 +186,7 @@ if %RC% EQU 0 (
     $state | ConvertTo-Json | Set-Content -Path (Join-Path $envDir 'env-state.json') -Encoding Ascii
     Write-Output 'env-state.json written'
 
-    # --- 10. best-effort mirror to C: and E: (fallback copies, cleanc-safe) ---
+    # --- 10. best-effort mirror to E: (fallback copy; never C:) ---
     foreach ($mirror in $mirrorDirs) {
         try {
             New-Item -ItemType Directory -Path $mirror -Force | Out-Null
